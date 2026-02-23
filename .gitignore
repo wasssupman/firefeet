@@ -4,3 +4,11 @@ db/
 .cache/
 __pycache__/
 .env
+
+# Claude Code
+.claude/settings.local.json
+.claude/worktrees/
+.claude/todos/
+
+# oh-my-claudecode
+.omc/
