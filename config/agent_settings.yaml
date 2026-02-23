@@ -1,0 +1,18 @@
+# Firefeet Stock Analysis Agent Settings
+
+# 분석기별 가중치 설정 (합계 1.0 권장)
+# LLM이 최종 의견을 도출할 때 이 가중치를 참조하여 프롬프트를 구성합니다.
+weights:
+  macro: 0.25      # 거시 경제 지표 및 시장 흐름
+  econ: 0.20       # 주요 경제 일정 및 지표 발표 결과
+  supply: 0.35     # 외국인/기관 수급 (국내 주식 핵심)
+  reddit: 0.10     # 해외 커뮤니티 심리 (API 연동 시 작동)
+  news: 0.10       # 글로벌 경제 뉴스 (Bloomberg, Reuters 등 Fallback)
+
+# 에이전트 기본 언어 설정
+language: "ko"
+
+# 클로드 모델 설정
+claude_model: "claude-3-5-sonnet-20240620"
+max_tokens: 2000
+temperature: 0.2

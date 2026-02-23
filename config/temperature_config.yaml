@@ -1,0 +1,159 @@
+# ──────────────────────────────────────────
+# Market Temperature 설정
+# 모든 모듈/서브모듈을 enabled: false 로 끌 수 있음
+# weight: 합산 시 상대 비중 (활성 모듈끼리 비례 배분)
+# ──────────────────────────────────────────
+
+modules:
+
+  # ── AI 거시경제 센티널 (오버라이드) ──
+  ai_macro:
+    enabled: true
+    model: "claude-sonnet-4-20250514" # Claude Sonnet for news override
+
+  # ── 매크로 추세 ──
+  macro:
+    enabled: true
+    weight: 40
+    trend_days: 3
+    sub_modules:
+      us_index:
+        enabled: true
+        score_range: [-40, 40]
+        multiplier: 20
+      vix:
+        enabled: true
+        score_range: [-30, 30]
+        level_thresholds:
+          extreme_fear: 30
+          fear: 25
+          normal: 18
+          calm: 12
+        trend_multiplier: 5
+      fx:
+        enabled: true
+        score_range: [-15, 15]
+        multiplier: 10
+        invert: true
+      bond:
+        enabled: true
+        score_range: [-15, 15]
+        multiplier: 5
+        invert: true
+
+  # ── 뉴스/커뮤니티 감성 ──
+  sentiment:
+    enabled: true
+    weight: 35
+    days: 3
+    day_weights: [0.5, 0.3, 0.2]
+    trend_threshold: 10
+    sub_modules:
+      naver_news:
+        enabled: true
+        pages_per_day: 3
+        bullish_keywords:
+          - 급등
+          - 상승
+          - 호재
+          - 매수세
+          - 반등
+          - 신고가
+          - 호실적
+          - 상한가
+          - 돌파
+          - 강세
+          - 기대감
+          - 외국인 매수
+          - 기관 매수
+        bearish_keywords:
+          - 급락
+          - 하락
+          - 악재
+          - 매도세
+          - 폭락
+          - 신저가
+          - 실적 부진
+          - 하한가
+          - 약세
+          - 우려
+          - 외국인 매도
+          - 리스크
+          - 경기 침체
+      global_news:
+        enabled: true
+        bullish_keywords:
+          - rally
+          - surge
+          - bullish
+          - breakout
+          - record high
+          - beat expectations
+          - strong earnings
+          - upgrade
+        bearish_keywords:
+          - crash
+          - plunge
+          - bearish
+          - selloff
+          - recession
+          - miss expectations
+          - weak
+          - downgrade
+
+  # ── 경제 지표 ──
+  econ:
+    enabled: true
+    weight: 25
+    sub_modules:
+      surprise:
+        enabled: true
+        score_range: [-60, 60]
+        importance_multiplier:
+          high: 3
+          medium: 2
+          low: 1
+      uncertainty:
+        enabled: true
+        score_range: [-40, 0]
+        penalty_per_event: -10
+
+# ── 온도 → 전략 프로파일 ──
+strategy_profiles:
+  HOT:
+    k: 0.3
+    take_profit: 4.0
+    stop_loss: -3.0
+    max_position_pct: 0.35
+    min_screen_score: 20
+  WARM:
+    k: 0.4
+    take_profit: 3.5
+    stop_loss: -3.0
+    max_position_pct: 0.30
+    min_screen_score: 30
+  NEUTRAL:
+    k: 0.5
+    take_profit: 3.0
+    stop_loss: -3.0
+    max_position_pct: 0.25
+    min_screen_score: 30
+  COOL:
+    k: 0.6
+    take_profit: 2.5
+    stop_loss: -2.5
+    max_position_pct: 0.20
+    min_screen_score: 45
+  COLD:
+    k: 0.7
+    take_profit: 2.0
+    stop_loss: -2.0
+    max_position_pct: 0.15
+    min_screen_score: 60
+
+# ── 온도 레벨 경계값 ──
+level_thresholds:
+  HOT: 70
+  WARM: 40
+  NEUTRAL: -20
+  COOL: -60

@@ -1,0 +1,21 @@
+# MacroAnalyzer 지표 설정
+# Phase별로 ON/OFF 가능
+
+phase1:  # MVP 핵심 지표
+  us_indices: true
+  fx_rate: true
+  vix: true
+
+phase2:  # 채권 & 원자재
+  bond_yields: false
+  commodities: false
+
+phase3:  # 심리 & 대체 지표
+  fear_greed: false
+  crypto: false
+  global_indices: false
+
+phase4:  # 한국 고유 지표
+  kospi_futures: false
+  program_trading: false
+  short_selling: false

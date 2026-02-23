@@ -1,0 +1,68 @@
+# 기본 규칙 (모든 온도에 적용)
+rules:
+  no_rebuy_after_sell:        # 매도 후 재매수 금지
+    enabled: true
+    allow_if_profitable: false  # true면 수익 매도 후 재매수 허용
+    cooldown_minutes: 0         # 0 = 당일 전체 금지
+
+  scan_interval:              # 스캔 주기
+    enabled: true
+    default_seconds: 300
+
+  loop_interval:              # 매매 루프 주기
+    enabled: true
+    default_seconds: 10
+
+  max_holdings:               # 최대 동시 보유 종목 수
+    enabled: false
+    default_count: 5
+
+  consecutive_sl_brake:         # 연속 손절 브레이크
+    enabled: true
+    max_consecutive: 3          # N연속 손절 시 발동
+    cooldown_minutes: 30        # 매매 중단 시간
+
+  max_position_amount:          # 건당 최대 매수금액
+    enabled: true
+    default_amount: 150000      # 15만원
+
+  daily_loss_limit:             # 일일 최대 손실 한도
+    enabled: true
+    max_loss_amount: -50000     # -5만원 도달 시 매매 종료
+
+# 온도별 오버라이드 (명시한 키만 덮어씀)
+temperature_overrides:
+  HOT:
+    no_rebuy_after_sell:
+      allow_if_profitable: true   # 수익 매도 → 재매수 허용
+      cooldown_minutes: 5         # 5분 쿨다운
+    scan_interval: {default_seconds: 180}
+    loop_interval: {default_seconds: 7}
+    max_holdings: {enabled: true, default_count: 8}
+    consecutive_sl_brake: {max_consecutive: 4, cooldown_minutes: 15}
+    max_position_amount: {default_amount: 200000}
+    daily_loss_limit: {max_loss_amount: -80000}
+
+  WARM:
+    no_rebuy_after_sell:
+      allow_if_profitable: true
+      cooldown_minutes: 10
+    scan_interval: {default_seconds: 240}
+    max_holdings: {enabled: true, default_count: 6}
+
+  NEUTRAL:
+    no_rebuy_after_sell:
+      allow_if_profitable: true    # 수익 매도 후 재매수 허용
+      cooldown_minutes: 30         # 30분 쿨다운 (오후 종목 풀 고갈 방지)
+    max_holdings: {enabled: true, default_count: 15}
+
+  COOL:
+    no_rebuy_after_sell: {allow_if_profitable: false, cooldown_minutes: 0}
+    max_holdings: {enabled: true, default_count: 3}
+
+  COLD:
+    no_rebuy_after_sell: {allow_if_profitable: false, cooldown_minutes: 0}
+    max_holdings: {enabled: true, default_count: 2}
+    consecutive_sl_brake: {max_consecutive: 2, cooldown_minutes: 60}
+    max_position_amount: {default_amount: 100000}
+    daily_loss_limit: {max_loss_amount: -30000}

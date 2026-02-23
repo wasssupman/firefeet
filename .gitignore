@@ -1,0 +1,6 @@
+config/secrets.yaml
+logs/
+db/
+.cache/
+__pycache__/
+.env

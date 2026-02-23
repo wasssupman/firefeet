@@ -1,0 +1,11 @@
+requests
+pyyaml
+pandas
+websockets
+schedule
+yfinance
+praw
+beautifulsoup4
+lxml
+anthropic
+google-generativeai

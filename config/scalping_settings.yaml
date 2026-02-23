@@ -1,0 +1,74 @@
+# 스캘핑 전략 설정
+
+# 예산
+scalping_budget: 9000000
+
+# 시그널 임계값
+default_confidence_threshold: 0.40
+
+# 손익 설정 (%)
+take_profit_pct: 1.2
+stop_loss_pct: -0.5
+
+# 트레일링 스탑
+trailing_stop_activation: 0.50    # 수수료(0.21%) + 최소 마진 확보 후 활성화
+trailing_stop_pct: 65             # 현재 수익의 65% 보장 (floor > 수수료)
+
+# 시그널 반전 청산 설정
+signal_exit:
+  min_hold_seconds: 90           # 최소 보유시간 (기존 45초 → 시그널 안정화)
+  min_loss_pct: -0.15            # 이 이상 손실 중일 때만 시그널 체크 (미세손실 무시)
+  exit_threshold_ratio: 0.50     # 진입 threshold × 0.5 이하 시 청산 (히스테리시스)
+
+# 시간 제한
+max_hold_seconds: 180             # 최대 보유 시간 (3분)
+eod_exit_time: "1515"             # 장 마감 전 전체 청산
+
+# 포지션 제한
+max_simultaneous_positions: 2
+max_position_value: 2000000        # 건당 최대 포지션 (KRW)
+sell_cooldown_seconds: 300        # 매도 후 동일 종목 재진입 금지 시간 (5분)
+
+# 가격 필터
+min_price: 3000
+max_price: 50000
+
+# 평가 주기
+eval_interval_ms: 1500            # 1.5초
+
+# 틱 버퍼
+tick_buffer_size: 600             # 600틱 ≈ 10분
+
+# 시그널 가중치 (합계 100)
+signal_weights:
+  vwap_reversion: 25
+  orderbook_pressure: 25
+  momentum_burst: 20
+  volume_surge: 15
+  micro_trend: 15
+
+# 하이브리드 모드 설정
+hybrid:
+  mode: "auto"                    # auto | micro_swing | aggressive
+  micro_swing_tp: 1.5             # 마이크로 스윙 TP (%)
+  micro_swing_sl: -0.5            # 마이크로 스윙 SL (%)
+  aggressive_tp: 2.0              # 공격적 스캘핑 TP (%)
+  aggressive_sl: -0.7             # 공격적 스캘핑 SL (%)
+  switch_threshold: 40            # 온도 40+ → 공격적, 미만 → 마이크로
+
+# WebSocket 구독 제한
+websocket:
+  max_subscriptions: 31           # 최대 구독 수 (tick 15 + orderbook 15 + notice 1)
+  tick_slots: 15                  # 체결가 구독 슬롯 (타겟 수와 일치)
+  orderbook_slots: 15             # 호가 구독 슬롯 (타겟 수와 일치)
+  notice_slots: 1                 # 체결통보 슬롯
+  rotation_interval: 180          # 구독 로테이션 주기 (초)
+
+# 스크리너 설정
+screener:
+  min_volume_ratio: 2.0           # 평소 대비 2배 이상 거래량
+  max_spread_bps: 30              # 스프레드 30bp 이하 (유동성)
+  optimal_price_min: 3000         # 저가주 제외 (틱 사이즈 불리)
+  optimal_price_max: 50000        # 고가주 제외 (유동성 불리)
+  refresh_interval: 180           # 3분마다 종목 갱신 (잦은 교체 방지)
+  min_trading_value: 10000000000  # 거래대금 최소 100억 (price × volume)

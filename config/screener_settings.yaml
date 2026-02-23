@@ -1,0 +1,35 @@
+# StockScreener Configuration
+# 복합 스코어링 기반 종목 스크리닝 설정
+
+# 평가 기준별 가중치 (합계 100)
+weights:
+  volume_surge: 20        # 거래량 급증 (5일 평균 대비)
+  price_momentum: 15      # 가격 모멘텀 (등락률 sweet spot)
+  ma_alignment: 20        # 이동평균 정배열 (P > 5MA > 20MA)
+  supply_demand: 20       # 수급 (외국인+기관 순매수)
+  breakout_proximity: 15  # 돌파 근접도 (현재가 vs 목표가)
+  intraday_strength: 10   # 장중 체력 (현재가 vs 장중 고가)
+
+# Pre-Filter (API 호출 없이 Scanner 데이터만으로 사전 제거)
+pre_filter:
+  min_volume: 500000      # 최소 거래량 (50만주)
+  max_price: 500000       # 최대 현재가 (50만원)
+  min_change_rate: -2.0   # 최소 등락률 (%)
+  max_change_rate: 15.0   # 최대 등락률 (%)
+
+# 스크리너 출력
+output:
+  min_score: 30           # 최소 합격 점수
+  min_breakout_proximity: 20  # 최소 돌파 근접도 (이하면 제외, 돌파 불가 종목 사전 차단)
+  max_stocks: 10          # 최대 선별 종목 수
+
+# 캐시 설정
+cache:
+  ttl: 300                # TTL (초) - 5분
+
+# AI 테마/내러티브 사전 필터 (가산점 부여)
+ai_thematic_filter:
+  enabled: true
+  model: "claude-sonnet-4-20250514"  # Claude Sonnet 사용
+  max_workers: 5             # 병렬 처리 스레드 (너무 높으면 API Rate Limit 주의)
+  top_n: 15                  # 퀀트 스코어 기준 상위 15개 종목만 AI가 검토 (비용 효율화)

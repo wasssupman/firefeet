@@ -1,0 +1,51 @@
+# Economic Calendar Configuration
+# 추적할 주요 경제 지표 목록
+
+indicators:
+  - name: "CPI"
+    keywords: ["Consumer Price Index", "CPI", "Core CPI", "소비자물가지수"]
+    country: "united states"
+    importance: "high"
+    unit: "pct"        # %p 단위 → 차이 방식
+
+  - name: "FOMC"
+    keywords: ["FOMC", "Fed Interest Rate", "Federal Funds Rate", "금리결정"]
+    country: "united states"
+    importance: "high"
+    unit: "pct"
+
+  - name: "Non-Farm Payrolls"
+    keywords: ["Nonfarm Payrolls", "Non-Farm Employment Change", "U.S. employment report", "Employment report", "비농업고용"]
+    country: "united states"
+    importance: "high"
+    unit: "abs"        # 절대값 → 비율 방식 (cap 적용)
+
+  - name: "Unemployment Rate"
+    keywords: ["Unemployment Rate", "실업률"]
+    country: "united states"
+    importance: "high"
+    unit: "pct"
+
+  - name: "GDP"
+    keywords: ["GDP", "Gross Domestic Product"]
+    country: "united states"
+    importance: "high"
+    unit: "pct"
+
+  - name: "PPI"
+    keywords: ["Producer Price Index", "PPI", "생산자물가지수"]
+    country: "united states"
+    importance: "medium"
+    unit: "pct"
+
+  - name: "ISM Manufacturing PMI"
+    keywords: ["ISM Manufacturing PMI", "ISM 제조업지수"]
+    country: "united states"
+    importance: "medium"
+    unit: "index"      # 지수 단위 (예: 50.3) → 차이 방식
+
+  - name: "Retail Sales"
+    keywords: ["Retail Sales", "소매판매"]
+    country: "united states"
+    importance: "medium"
+    unit: "pct"

@@ -1,0 +1,20 @@
+candle_interval: 15          # 분석 캔들 주기 (초)
+max_candles: 60              # 캔들 히스토리 크기
+
+atr:
+  period: 14
+  tp_multiplier: 1.5         # TP = ATR * 1.5
+  sl_multiplier: 1.0         # SL = ATR * 1.0
+  min_tp: 0.3                # 최소 TP (%)
+  max_tp: 1.5                # 최대 TP (%)
+  min_sl: -0.8               # 최소 SL (%) — 가장 넓은 손절
+  max_sl: -0.35              # 최대 SL (%) — 가장 좁은 손절 (수수료 0.21% + 슬리피지 감안)
+
+bollinger:
+  period: 20
+  num_std: 2.0
+  early_exit_threshold: 0.8  # BB position > 0.8 시 TP 축소
+
+support_resistance:
+  lookback: 30
+  min_touches: 2             # 피봇 인정 최소 터치 횟수

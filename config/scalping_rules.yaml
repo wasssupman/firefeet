@@ -1,0 +1,73 @@
+# 스캘핑 리스크 규칙
+
+# 모드별 리스크 규칙
+mode:
+  real:
+    per_trade:
+      max_loss_amount: 5000           # 건당 최대 손실 (KRW)
+      max_loss_pct: 0.5               # 건당 최대 손실률 (%)
+      max_position_value: 200000      # 건당 최대 포지션 (KRW)
+    daily_limits:
+      max_daily_loss: 30000           # 일일 최대 손실 (KRW)
+      max_daily_loss_pct: 6.0         # 일일 최대 손실률 (%)
+      max_consecutive_losses: 5       # 서킷브레이커 연속 손실 횟수
+      cooldown_after_circuit: 600     # 쿨다운 (초)
+      max_daily_trades: 50            # 일일 거래 한도
+    time_restrictions:
+      no_entry_before: "0905"         # 장 초반 5분 변동성 회피
+      no_entry_after: "1510"          # 마감 20분전 진입 차단
+      force_exit_by: "1520"           # 마감 10분전 전체 청산
+
+  paper:
+    per_trade:
+      max_loss_amount: 20000          # 건당 2만원
+      max_loss_pct: 1.0               # 건당 최대 손실률 (%)
+      max_position_value: 2000000     # 건당 최대 포지션 (KRW)
+    daily_limits:
+      max_daily_loss: 200000          # 일일 20만원
+      max_daily_loss_pct: 5.0         # 일일 최대 손실률 (%)
+      max_consecutive_losses: 5       # 서킷브레이커 연속 손실 횟수
+      cooldown_after_circuit: 300     # 쿨다운 (초)
+      max_daily_trades: 100           # 일일 거래 한도
+    time_restrictions:
+      no_entry_before: "0900"         # 장 시작부터 진입 가능
+      no_entry_after: "1525"          # 15:25까지 진입 가능
+      force_exit_by: "1528"           # 15:28 전체 청산
+
+# 온도별 오버라이드 (공통)
+temperature_overrides:
+  HOT:
+    confidence: 0.35
+    max_positions: 3
+    mode: aggressive
+    take_profit_pct: 2.0
+    stop_loss_pct: -0.8
+  WARM:
+    confidence: 0.38
+    max_positions: 2
+    mode: aggressive
+    take_profit_pct: 1.5
+    stop_loss_pct: -0.7
+  NEUTRAL:
+    confidence: 0.40
+    max_positions: 2
+    mode: aggressive
+    take_profit_pct: 1.2
+    stop_loss_pct: -0.5
+  COOL:
+    confidence: 0.45
+    max_positions: 2
+    mode: micro_swing
+    take_profit_pct: 1.0
+    stop_loss_pct: -0.5
+  COLD:
+    confidence: 0.50
+    max_positions: 1
+    mode: micro_swing
+    take_profit_pct: 0.8
+    stop_loss_pct: -0.4
+
+# 미체결 주문 관리 (공통)
+unfilled_order:
+  timeout_seconds: 3              # 미체결 3초 → 취소
+  max_retries: 2                  # 최대 재시도 횟수
