@@ -1,4 +1,5 @@
 config/secrets.yaml
+config/test.yaml
 logs/
 db/
 .cache/
