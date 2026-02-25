@@ -13,10 +13,14 @@ import os
 import time
 import datetime
 import yaml
+import tempfile
 from datetime import timezone, timedelta
 
+from core.encoding_setup import setup_utf8_stdout
+setup_utf8_stdout()
+
 # ── 중복 실행 방지 (PID 파일 락) ──────────────────────────
-_PID_FILE = "/tmp/firefeet_scalper.pid"
+_PID_FILE = os.path.join(tempfile.gettempdir(), "firefeet_scalper.pid")
 
 def _acquire_lock():
     """이미 실행 중인 프로세스가 있으면 종료."""
@@ -29,8 +33,9 @@ def _acquire_lock():
             print(f"[Scalper] ❌ 이미 실행 중입니다 (PID {old_pid}). 중복 실행 방지로 종료합니다.")
             print(f"[Scalper]    기존 프로세스를 먼저 종료하세요: kill {old_pid}")
             sys.exit(1)
-        except (ProcessLookupError, PermissionError):
+        except (ProcessLookupError, PermissionError, OSError):
             # 프로세스 없음 → 좀비 PID 파일, 무시하고 계속
+            # OSError: Windows에서 os.kill(pid, 0) 미지원
             pass
         except ValueError:
             pass  # PID 파일 손상 → 무시

@@ -1,5 +1,10 @@
+import sys
 import pandas as pd
 import json
+
+from core.encoding_setup import setup_utf8_stdout
+setup_utf8_stdout()
+
 from core.analysis.ai_swing_agent import AISwingAgent
 
 def test_ai_swing_parsing():

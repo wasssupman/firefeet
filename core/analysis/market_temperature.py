@@ -70,6 +70,21 @@ class MarketTemperature:
                 failed.append(name)
                 print(f"[Temperature] {name} 모듈 예외: {e}")
 
+        # 실패 모듈 과반수 경고
+        total_modules = len(self.modules)
+        if total_modules > 0 and len(failed) >= total_modules / 2:
+            warning_msg = (
+                f"[MarketTemperature] 온도 모듈 과반수 실패! "
+                f"({len(failed)}/{total_modules}): {', '.join(failed)}"
+            )
+            print(warning_msg)
+            try:
+                from core.discord_client import DiscordClient
+                discord = DiscordClient()
+                discord.send_message(f"**온도 모듈 과반수 실패 경고**\n{len(failed)}/{total_modules} 모듈 실패: {', '.join(failed)}\n시장 온도가 부정확할 수 있습니다.")
+            except Exception:
+                pass
+
         # 활성 모듈만 가중치 재배분
         active_weights = {name: self.modules[name].weight for name in results}
         total_weight = sum(active_weights.values())

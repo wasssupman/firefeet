@@ -3,6 +3,7 @@ import json
 import logging
 from core.config_loader import ConfigLoader
 from core.news_analyzer import NewsAnalyzer
+from core.analysis.llms.claude_cli import call_claude as cli_call_claude, ClaudeCLIError
 
 class AIMacroModule:
     """
@@ -23,6 +24,7 @@ class AIMacroModule:
 
         self.client = None
         self.client_ready = False
+        self.use_cli = False
         if api_key:
             try:
                 import anthropic
@@ -32,9 +34,11 @@ class AIMacroModule:
                     self.client = anthropic.Anthropic(api_key=api_key)
                 self.client_ready = True
             except ImportError:
-                self.logger.warning("anthropic not installed.")
+                self.logger.warning("anthropic not installed. CLI fallback 사용.")
+                self.use_cli = True
         else:
-            self.logger.warning("ANTHROPIC_API_KEY not found.")
+            self.logger.warning("ANTHROPIC_API_KEY not found. CLI fallback 사용.")
+            self.use_cli = True
 
         self.news_analyzer = NewsAnalyzer()
 
@@ -48,8 +52,8 @@ class AIMacroModule:
                 "reasoning": str
             }
         """
-        if not self.enabled or not self.client_ready:
-            return {"multiplier": 1.0, "reasoning": "AI Macro disabled or API key missing."}
+        if not self.enabled:
+            return {"multiplier": 1.0, "reasoning": "AI Macro disabled."}
 
         self.logger.info("AI Macro Sentinel: Fetching top breaking news...")
         headlines = self.news_analyzer.fetch_global_news_titles(limit=15)
@@ -77,30 +81,39 @@ class AIMacroModule:
     "reasoning": "주요 뉴스에서 특별한 시스템적 리스크가 발견되지 않으며, 연준 발언도 예상에 부합함."
 }}
 """
+        text = ""
         try:
-            response = self.client.messages.create(
-                model=self.model_name,
-                max_tokens=512,
-                temperature=0.0,
-                messages=[{"role": "user", "content": prompt}]
-            )
-            text = response.content[0].text.strip()
-            if "```json" in text:
-                text = text.split("```json")[1].split("```")[0].strip()
-            elif "```" in text:
-                text = text.split("```")[1].split("```")[0].strip()
-
-            result = json.loads(text)
-
-            # Sanity check on multiplier
-            multiplier = float(result.get("multiplier", 1.0))
-            if multiplier < -1.0 or multiplier > 2.0:
-                multiplier = 1.0
-
-            return {
-                "multiplier": multiplier,
-                "reasoning": result.get("reasoning", "")
-            }
+            if self.client_ready and self.client:
+                response = self.client.messages.create(
+                    model=self.model_name,
+                    max_tokens=512,
+                    temperature=0.0,
+                    messages=[{"role": "user", "content": prompt}]
+                )
+                text = response.content[0].text.strip()
+            else:
+                text = cli_call_claude(prompt, timeout=60).strip()
         except Exception as e:
-            self.logger.error(f"AIMacro Sentinel failed: {e}")
-            return {"multiplier": 1.0, "reasoning": f"AI Error: {e}"}
+            self.logger.error(f"AIMacro Sentinel API failed: {e}. Trying CLI...")
+            try:
+                text = cli_call_claude(prompt, timeout=60).strip()
+            except ClaudeCLIError as cli_err:
+                self.logger.error(f"AIMacro CLI also failed: {cli_err}")
+                return {"multiplier": 1.0, "reasoning": f"AI Error: API={e}, CLI={cli_err}"}
+
+        if "```json" in text:
+            text = text.split("```json")[1].split("```")[0].strip()
+        elif "```" in text:
+            text = text.split("```")[1].split("```")[0].strip()
+
+        result = json.loads(text)
+
+        # Sanity check on multiplier
+        multiplier = float(result.get("multiplier", 1.0))
+        if multiplier < -1.0 or multiplier > 2.0:
+            multiplier = 1.0
+
+        return {
+            "multiplier": multiplier,
+            "reasoning": result.get("reasoning", "")
+        }

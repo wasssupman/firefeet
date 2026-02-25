@@ -10,6 +10,10 @@
 """
 import sys
 import yaml
+
+from core.encoding_setup import setup_utf8_stdout
+setup_utf8_stdout()
+
 from core.discord_client import DiscordClient
 
 

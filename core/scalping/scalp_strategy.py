@@ -67,7 +67,7 @@ class ScalpStrategy:
         if profile:
             mode = profile.name
             tp, sl = profile.take_profit, profile.stop_loss
-            threshold = profile.confidence_threshold
+            threshold = max(profile.confidence_threshold, self.confidence_threshold)
         else:
             mode = self._get_mode()
             tp, sl = self._get_tp_sl(mode)

@@ -3,6 +3,7 @@ import json
 import logging
 from core.interfaces.llm import IExecutorLLM
 from core.config_loader import ConfigLoader
+from core.analysis.llms.claude_cli import call_claude as cli_call_claude, ClaudeCLIError
 
 class ClaudeExecutor(IExecutorLLM):
     """
@@ -79,27 +80,10 @@ class ClaudeExecutor(IExecutorLLM):
     def _call_claude(self, prompt: str) -> str:
         """Call Claude implementation (CLI or API)"""
         if self.use_cli:
-            import subprocess
             try:
-                env = os.environ.copy()
-                env.pop("CLAUDECODE", None)
-                result = subprocess.run(
-                    ["claude", "-p", prompt],
-                    capture_output=True,
-                    text=True,
-                    timeout=60,
-                    env=env
-                )
-                if result.returncode == 0:
-                    return result.stdout.strip()
-                else:
-                    self.logger.error(f"Claude CLI Error: {result.stderr}")
-                    return self._fallback_json()
-            except FileNotFoundError:
-                self.logger.error("Claude CLI tool not found.")
-                return self._fallback_json()
-            except subprocess.TimeoutExpired:
-                self.logger.error("Claude CLI timed out.")
+                return cli_call_claude(prompt, timeout=60)
+            except ClaudeCLIError as e:
+                self.logger.error(f"Claude CLI Error: {e}")
                 return self._fallback_json()
         
         elif self.client:

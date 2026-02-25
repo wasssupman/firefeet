@@ -1,8 +1,11 @@
 import yaml
 import os
 import datetime
+from datetime import timezone, timedelta
 from dataclasses import dataclass, field
 from typing import Dict, Optional
+
+KST = timezone(timedelta(hours=9))
 
 
 @dataclass
@@ -39,7 +42,7 @@ class StrategySelector:
         점심 구간(12:00~13:30)이면 None 반환 → 진입 차단.
         """
         cfg = self._load_config()
-        now_str = datetime.datetime.now().strftime("%H%M")
+        now_str = datetime.datetime.now(KST).strftime("%H%M")
 
         # 1. 점심 구간 차단
         lunch_start = cfg.get("lunch_block_start", "1200")

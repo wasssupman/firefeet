@@ -68,9 +68,14 @@ async def start_bot(bot_id: str, payload: StartBotRequest = None):
     # Allow overriding args from UI, otherwise default
     args = payload.args if payload and payload.args else BOTS[bot_id]["args"]
         
-    success, msg = await manager.start_bot(bot_id, script, args)
+    import traceback
+    try:
+        success, msg = await manager.start_bot(bot_id, script, args)
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Internal error: {repr(e)}")
     if not success:
-        raise HTTPException(status_code=400, detail=msg)
+        raise HTTPException(status_code=400, detail=msg or "Unknown error")
     return {"status": "started", "message": msg}
 
 @app.post("/api/bots/{bot_id}/stop")
@@ -141,15 +146,18 @@ def get_market_summary(force: bool = False):
 '''
         env = os.environ.copy()
         env.pop("CLAUDECODE", None)
+        env["PYTHONIOENCODING"] = "utf-8"
         result = subprocess.run(
             ["claude", "-p", "--output-format", "text"],
             input=prompt,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=60,
             env=env
         )
-        
+
         output = result.stdout.strip()
         if "```" in output:
              output = output.replace("```json", "").replace("```", "").strip()
@@ -188,15 +196,18 @@ def get_market_prediction(force: bool = False):
 '''
         env = os.environ.copy()
         env.pop("CLAUDECODE", None)
+        env["PYTHONIOENCODING"] = "utf-8"
         result = subprocess.run(
             ["claude", "-p", "--output-format", "text"],
             input=prompt,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=60,
             env=env
         )
-        
+
         output = result.stdout.strip()
         parsed = {"prediction": output if output else "Prediction unavailable."}
                 

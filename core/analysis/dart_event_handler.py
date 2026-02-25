@@ -7,10 +7,9 @@ DartAPIClient가 감지한 신규 공시를 받아 LLM으로 심층 분석 후
 """
 
 import logging
-import os
-import subprocess
 import json
 from core.providers.dart_api import DartAnnouncement
+from core.analysis.llms.claude_cli import call_claude as cli_call_claude, ClaudeCLIError
 
 logger = logging.getLogger("DartEventHandler")
 
@@ -94,27 +93,26 @@ class DartEventHandler:
 {{"action": "PANIC_SELL" 또는 "WATCH_BUY" 또는 "IGNORE", "reason": "핵심 사유 1문장"}}
 """
         try:
-            env = os.environ.copy()
-            env.pop("CLAUDECODE", None)
-            result = subprocess.run(
-                ["claude", "-p", "--output-format", "text"],
-                input=prompt,
-                capture_output=True, text=True, timeout=20, env=env
-            )
-            raw = result.stdout.strip()
+            raw = cli_call_claude(prompt, timeout=60)
             if "```" in raw:
                 raw = raw.replace("```json", "").replace("```", "").strip()
             if "{" in raw:
                 raw = raw[raw.find("{"):raw.rfind("}") + 1]
                 return json.loads(raw)
-        except Exception as e:
+        except ClaudeCLIError as e:
             logger.warning(f"LLM 공시 분류 실패: {e}")
 
-        # 키워드 기반 폴백
-        if any(k in ann.report_nm for k in ["유상증자", "횡령", "부도", "관리종목"]):
-            return {"action": "PANIC_SELL", "reason": "키워드 기반 악재 판정 (LLM 불가)"}
-        if any(k in ann.report_nm for k in ["수주", "계약체결", "무상증자"]):
-            return {"action": "WATCH_BUY", "reason": "키워드 기반 호재 판정 (LLM 불가)"}
+        # 키워드 기반 폴백 (정밀 매칭)
+        title = ann.report_nm
+        panic_keywords = ["유상증자", "횡령", "배임", "관리종목", "상장폐지"]
+        # "부도" 키워드는 "부동산"과 구분 필요
+        if any(k in title for k in panic_keywords):
+            return {"action": "PANIC_SELL", "reason": f"키워드 기반 악재 판정 (LLM 불가): {[k for k in panic_keywords if k in title]}"}
+        if "부도" in title and "부동산" not in title:
+            return {"action": "PANIC_SELL", "reason": "키워드 기반 악재 판정 (LLM 불가): 부도"}
+        buy_keywords = ["수주", "계약체결", "무상증자", "자사주 취득"]
+        if any(k in title for k in buy_keywords):
+            return {"action": "WATCH_BUY", "reason": f"키워드 기반 호재 판정 (LLM 불가): {[k for k in buy_keywords if k in title]}"}
         return {"action": "IGNORE", "reason": "분류 불가 — 무시"}
 
     def _trigger_panic_sell(self, corp_code: str, corp_name: str, reason: str):

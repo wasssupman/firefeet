@@ -2,6 +2,9 @@ import yaml
 import os
 import time
 import datetime
+from datetime import timezone, timedelta
+
+KST = timezone(timedelta(hours=9))
 
 class RiskManager:
     """스캘핑 리스크 관리 + 서킷브레이커"""
@@ -108,7 +111,7 @@ class RiskManager:
     def _check_time_restrictions(self):
         """시간 제한 체크"""
         time_rules = self.rules.get("time_restrictions", {})
-        now = datetime.datetime.now()
+        now = datetime.datetime.now(KST)
         current_time = now.strftime("%H%M")
 
         no_before = time_rules.get("no_entry_before", "0910")
@@ -125,7 +128,7 @@ class RiskManager:
         """전체 청산 필요 여부"""
         time_rules = self.rules.get("time_restrictions", {})
         force_exit_by = time_rules.get("force_exit_by", "1515")
-        now = datetime.datetime.now().strftime("%H%M")
+        now = datetime.datetime.now(KST).strftime("%H%M")
         return now >= force_exit_by
 
     def _get_max_positions(self):

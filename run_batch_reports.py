@@ -7,6 +7,9 @@ import json
 import subprocess
 from datetime import datetime
 
+from core.encoding_setup import setup_utf8_stdout
+setup_utf8_stdout()
+
 # 프로젝트 루트 경로 추가
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -16,6 +19,44 @@ from core.config_loader import ConfigLoader
 from core.kis_auth import KISAuth
 from core.providers.kis_api import KISManager
 from core.news_scraper import NewsScraper
+
+def _startup_health_check():
+    """배치 리포트 시작 전 필수 의존성 점검"""
+    import subprocess
+
+    warnings = []
+
+    # 1. Claude CLI 사용 가능 여부
+    try:
+        env = os.environ.copy()
+        env.pop("CLAUDECODE", None)
+        result = subprocess.run(
+            ["claude", "--version"],
+            capture_output=True, text=True, timeout=10,
+            env=env, encoding="utf-8", errors="replace"
+        )
+        if result.returncode != 0:
+            warnings.append("Claude CLI 실행 불가")
+    except FileNotFoundError:
+        warnings.append("Claude CLI 미설치 — API 전용 모드로 동작")
+    except Exception:
+        warnings.append("Claude CLI 확인 실패")
+
+    # 2. config 파일 확인
+    if not os.path.exists("config/secrets.yaml"):
+        print("[FATAL] config/secrets.yaml 누락. 종료합니다.")
+        sys.exit(1)
+
+    # 3. logs/reports 디렉토리
+    os.makedirs("logs", exist_ok=True)
+    os.makedirs("reports", exist_ok=True)
+
+    if warnings:
+        for w in warnings:
+            print(f"  [WARN] {w}")
+
+    print("[Health Check] 통과.")
+
 
 def get_top_stocks(limit=20, use_ai=True):
     """
@@ -165,7 +206,9 @@ def get_top_stocks(limit=20, use_ai=True):
             capture_output=True,
             text=True,
             timeout=180,
-            env=env
+            env=env,
+            encoding="utf-8",
+            errors="replace"
         )
         
         output = result.stdout.strip()
@@ -285,6 +328,7 @@ def run_batch_analysis(stocks, batch_size=3, sleep_between_stocks=15, sleep_betw
             print("\n")
 
 if __name__ == "__main__":
+    _startup_health_check()
     parser = argparse.ArgumentParser(description="수십 개의 종목을 자동으로 필터링 및 리포팅하는 배치 스크립트")
     parser.add_argument("--limit", type=int, default=10, help="스크리닝할 총 종목 수 (기본 10)")
     parser.add_argument("--batch", type=int, default=3, help="한 번에 연속으로 분석할 묶음 개수 (기본 3)")

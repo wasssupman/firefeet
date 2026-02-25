@@ -9,12 +9,56 @@ AI 딥 리서치 — 장기투자 종목 분석
 import sys
 import yaml
 import time
+
+from core.encoding_setup import setup_utf8_stdout
+setup_utf8_stdout()
+
 from core.config_loader import ConfigLoader
 from core.kis_auth import KISAuth
 from core.providers.kis_api import KISManager
 from core.deep_analysis.deep_agent import DeepAgent
 from core.deep_analysis.report_builder import ReportBuilder
 from core.discord_client import DiscordClient
+
+
+def _startup_health_check():
+    """딥 리서치 시작 전 필수 의존성 점검"""
+    import os
+    import subprocess
+
+    warnings = []
+
+    # 1. Claude CLI 사용 가능 여부
+    try:
+        env = os.environ.copy()
+        env.pop("CLAUDECODE", None)
+        result = subprocess.run(
+            ["claude", "--version"],
+            capture_output=True, text=True, timeout=10,
+            env=env, encoding="utf-8", errors="replace"
+        )
+        if result.returncode != 0:
+            warnings.append("Claude CLI 실행 불가")
+    except FileNotFoundError:
+        warnings.append("Claude CLI 미설치 — API 전용 모드로 동작")
+    except Exception:
+        warnings.append("Claude CLI 확인 실패")
+
+    # 2. config 파일 확인
+    if not os.path.exists("config/secrets.yaml"):
+        print("[FATAL] config/secrets.yaml 누락. 종료합니다.")
+        sys.exit(1)
+    if not os.path.exists("config/deep_analysis.yaml"):
+        warnings.append("config/deep_analysis.yaml 누락 — 기본 설정 사용")
+
+    # 3. logs 디렉토리
+    os.makedirs("logs", exist_ok=True)
+
+    if warnings:
+        for w in warnings:
+            print(f"  [WARN] {w}")
+
+    print("[Health Check] 통과.")
 
 
 def load_config():
@@ -103,6 +147,7 @@ def run_watchlist():
 
 
 def main():
+    _startup_health_check()
     args = sys.argv[1:]
 
     if not args:

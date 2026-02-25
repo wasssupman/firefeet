@@ -1,9 +1,12 @@
 import time
 import datetime
+from datetime import timezone, timedelta
 import threading
 import yaml
 import os
 import json
+
+KST = timezone(timedelta(hours=9))
 
 from core.providers.kis_api import OrderType
 from core.trade_logger import TradeLogger
@@ -99,7 +102,7 @@ class ScalpEngine:
         """재시작 후에도 매도 쿨다운 복원 (당일 쿨다운만 유효)"""
         try:
             if os.path.exists(self._sell_cooldown_path):
-                with open(self._sell_cooldown_path, "r") as f:
+                with open(self._sell_cooldown_path, "r", encoding="utf-8") as f:
                     raw = json.load(f)
                 now = time.time()
                 # 만료된 항목 제거, 타입 보정
@@ -117,7 +120,7 @@ class ScalpEngine:
         """매도 쿨다운을 디스크에 저장"""
         try:
             os.makedirs(os.path.dirname(self._sell_cooldown_path), exist_ok=True)
-            with open(self._sell_cooldown_path, "w") as f:
+            with open(self._sell_cooldown_path, "w", encoding="utf-8") as f:
                 json.dump(self._sell_cooldown, f)
         except Exception as e:
             print(f"[ScalpEngine] 쿨다운 저장 실패: {e}")
@@ -278,7 +281,7 @@ class ScalpEngine:
 
     def _eval_cycle(self):
         """한 사이클: 미체결 관리 → 매도 평가 → 매수 평가"""
-        now = datetime.datetime.now()
+        now = datetime.datetime.now(KST)
         time_str = now.strftime("%H%M")
 
         # 30초마다 상태 로그
@@ -297,11 +300,35 @@ class ScalpEngine:
         self.settings = self._load_settings()
         self.risk_manager.reload_rules()
 
+        # 0. 런타임 불변조건 가드
+        _max_pos = self.risk_manager._get_max_positions()
+        _pending_buys = sum(1 for p in self.pending_orders.values() if p["type"] == "BUY")
+        _effective = len(self.positions) + _pending_buys
+        if _effective > _max_pos + 1:
+            print(f"[ScalpEngine] 🚨 INVARIANT VIOLATION: 포지션 초과 "
+                  f"({_effective} > {_max_pos}+1) — 전 포지션 청산 + 엔진 중지")
+            self._force_exit_all("SCALP_SELL_INVARIANT")
+            self.stop()
+            return
+
+        _budget = self.settings.get("scalping_budget", 500000)
+        _invested = sum(p["qty"] * p["buy_price"] for p in self.positions.values())
+        _pending_inv = sum(p["qty"] * p["price"] for p in self.pending_orders.values()
+                          if p["type"] == "BUY")
+        if (_invested + _pending_inv) > _budget * 1.5:
+            print(f"[ScalpEngine] 🚨 INVARIANT VIOLATION: 예산 초과 "
+                  f"({_invested + _pending_inv:,.0f} > {_budget * 1.5:,.0f}) — 전 포지션 청산 + 엔진 중지")
+            self._force_exit_all("SCALP_SELL_INVARIANT")
+            self.stop()
+            return
+
         # 1. 전체 청산 시간 체크
         if self.risk_manager.should_force_exit():
             if self.positions:
                 print(f"[ScalpEngine] 장 마감 전 전체 청산 ({time_str})")
                 self._force_exit_all("SCALP_SELL_EOD")
+            print(f"[ScalpEngine] 장 마감 시간 도달 — 엔진 중지 ({time_str})")
+            self.stop()
             return
 
         # 2. 서킷브레이커 체크 — 전 포지션 청산
@@ -338,6 +365,12 @@ class ScalpEngine:
 
     def _eval_entry(self, code):
         """매수 진입 평가"""
+        # 포지션 + 미체결 매수 합산 한도 체크
+        max_positions = self.risk_manager._get_max_positions()
+        pending_buys = sum(1 for p in self.pending_orders.values() if p["type"] == "BUY")
+        if (len(self.positions) + pending_buys) >= max_positions:
+            return
+
         # 주문 쿨다운 체크
         if code in self._order_cooldown and time.time() < self._order_cooldown[code]:
             return
@@ -567,6 +600,11 @@ class ScalpEngine:
             return
 
         if order_no:
+            # 즉시 매도 쿨다운 등록 (체결 전에도 재진입 차단)
+            sell_cooldown_secs = self.settings.get("sell_cooldown_seconds", 300)
+            self._sell_cooldown[code] = time.time() + sell_cooldown_secs
+            self._save_sell_cooldown()
+
             # 매도 주문 접수 → pending_orders에 등록, 포지션에 selling 플래그
             self.pending_orders[order_no] = {
                 "code": code,

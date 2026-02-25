@@ -7,6 +7,7 @@ import numpy as np
 from datetime import datetime, timezone, timedelta
 
 from core.config_loader import ConfigLoader
+from core.analysis.llms.claude_cli import call_claude as cli_call_claude, ClaudeCLIError, ClaudeCLIAuthError
 
 KST = timezone(timedelta(hours=9))
 
@@ -336,37 +337,12 @@ class DeepAgent:
             return f"Claude API 호출 실패: {e}"
 
     def _call_claude_cli(self, prompt: str, max_tokens: int) -> str:
-        """claude CLI를 통한 호출 (Max 플랜 인증 활용)"""
+        """claude CLI를 통한 호출 (공통 유틸 사용)"""
         try:
-            env = os.environ.copy()
-            env.pop("CLAUDECODE", None)
-
-            result = subprocess.run(
-                ["claude", "-p", "--output-format", "text"],
-                input=prompt,
-                capture_output=True,
-                text=True,
-                timeout=180,
-                env=env,
-            )
-
-            output = result.stdout.strip()
-            stderr = result.stderr.strip()
-
-            # 로그인 안 된 경우 감지
-            if "Not logged in" in output or "Not logged in" in stderr or "/login" in output:
-                return ("Claude CLI 인증 필요: 터미널에서 'claude login'을 먼저 실행하세요.\n"
-                        "(Max 플랜이면 'claude login' → 브라우저 인증)")
-
-            if result.returncode != 0 and stderr:
-                return f"Claude CLI 호출 실패: {stderr}"
-
-            return output or stderr
-        except subprocess.TimeoutExpired:
-            return "Claude CLI 호출 타임아웃 (180초)"
-        except FileNotFoundError:
-            return "claude CLI를 찾을 수 없습니다. Claude Code가 설치되어 있는지 확인하세요."
-        except Exception as e:
+            return cli_call_claude(prompt, timeout=180)
+        except ClaudeCLIAuthError as e:
+            return str(e)
+        except ClaudeCLIError as e:
             return f"Claude CLI 호출 실패: {e}"
 
     # ──────────────────────────────────────────────────────────────

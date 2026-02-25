@@ -16,6 +16,9 @@ import sys
 from PIL import Image, ImageDraw
 import io
 
+from core.encoding_setup import setup_utf8_stdout
+setup_utf8_stdout()
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",

@@ -4,6 +4,9 @@ import pandas as pd
 import json
 from pprint import pprint
 
+from core.encoding_setup import setup_utf8_stdout
+setup_utf8_stdout()
+
 # Ensure the core module is in the path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 

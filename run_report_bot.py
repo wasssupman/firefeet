@@ -19,6 +19,9 @@ import yaml
 import sys
 import time
 
+from core.encoding_setup import setup_utf8_stdout
+setup_utf8_stdout()
+
 from core.config_loader import ConfigLoader
 from core.kis_auth import KISAuth
 from core.providers.kis_api import KISManager

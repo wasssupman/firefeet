@@ -3,6 +3,7 @@ import json
 import logging
 from core.interfaces.llm import IAnalystLLM
 from core.config_loader import ConfigLoader
+from core.analysis.llms.claude_cli import call_claude as cli_call_claude, ClaudeCLIError
 
 class ClaudeAnalyst(IAnalystLLM):
     """
@@ -20,6 +21,7 @@ class ClaudeAnalyst(IAnalystLLM):
         api_key = secrets.get("ANTHROPIC_API_KEY", os.environ.get("ANTHROPIC_API_KEY", ""))
 
         self.client = None
+        self.use_cli = False
         self.use_mock = False
 
         if api_key:
@@ -30,31 +32,41 @@ class ClaudeAnalyst(IAnalystLLM):
                 else:
                     self.client = anthropic.Anthropic(api_key=api_key)
             except ImportError:
-                self.logger.warning("anthropic not installed. Falling back to mock analyst.")
-                self.use_mock = True
+                self.logger.warning("anthropic not installed. Falling back to Claude CLI.")
+                self.use_cli = True
         else:
-            self.logger.warning("No ANTHROPIC_API_KEY found. Falling back to mock analyst.")
-            self.use_mock = True
+            self.logger.warning("No ANTHROPIC_API_KEY found. Falling back to Claude CLI.")
+            self.use_cli = True
 
     def analyze(self, code: str, name: str, data: dict) -> str:
         self.logger.info(f"[{name}({code})] Claude Analyst: Starting deep data interpretation (Orchestration Phase 1)...")
         prompt = self._build_analyst_prompt(code, name, data)
 
-        if self.use_mock or self.client is None:
+        if self.use_mock:
             self.logger.info("Using mock Claude response...")
             return self._get_mock_response(name)
 
+        # 1차: API 호출
+        if self.client:
+            try:
+                response = self.client.messages.create(
+                    model=self.model_name,
+                    max_tokens=2048,
+                    temperature=self.temperature,
+                    messages=[{"role": "user", "content": prompt}]
+                )
+                return response.content[0].text
+            except Exception as e:
+                self.logger.error(f"Claude API Error: {e}. Falling back to CLI.")
+
+        # 2차: CLI fallback
         try:
-            response = self.client.messages.create(
-                model=self.model_name,
-                max_tokens=2048,
-                temperature=self.temperature,
-                messages=[{"role": "user", "content": prompt}]
-            )
-            return response.content[0].text
-        except Exception as e:
-            self.logger.error(f"Claude API Error: {e}")
-            raise RuntimeError(f"Analyst implementation failed: {str(e)}")
+            return cli_call_claude(prompt, timeout=90)
+        except ClaudeCLIError as e:
+            self.logger.error(f"Claude CLI Error: {e}. Falling back to mock.")
+
+        # 3차: Mock fallback (최후 수단)
+        return self._get_mock_response(name)
 
     def _build_analyst_prompt(self, code: str, name: str, data: dict) -> str:
         """Builds a prompt tailored for Claude to produce a comprehensive markdown memo."""

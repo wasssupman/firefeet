@@ -9,6 +9,9 @@ StockScreener 통합 테스트.
 import sys
 import os
 
+from core.encoding_setup import setup_utf8_stdout
+setup_utf8_stdout()
+
 # ────────────────────── Mock Classes ──────────────────────
 
 class MockStrategy:

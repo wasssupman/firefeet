@@ -20,7 +20,7 @@ class KISAuth:
         # 1. Try Cache
         if os.path.exists(cache_path):
             try:
-                with open(cache_path, 'r') as f:
+                with open(cache_path, 'r', encoding='utf-8') as f:
                     cache = json.load(f)
                     
                 # Check expiration (buffer of 60 seconds)
@@ -57,7 +57,7 @@ class KISAuth:
             expires_in = int(data.get("expires_in", 86400))
             expiry_epoch = int(time.time()) + expires_in
             
-            with open(cache_path, 'w') as f:
+            with open(cache_path, 'w', encoding='utf-8') as f:
                 json.dump({
                     "token": self.token,
                     "token_expired_at": self.token_expired,

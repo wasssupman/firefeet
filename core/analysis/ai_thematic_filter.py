@@ -3,6 +3,7 @@ import json
 import logging
 import concurrent.futures
 from core.config_loader import ConfigLoader
+from core.analysis.llms.claude_cli import call_claude as cli_call_claude, ClaudeCLIError
 
 class AIThematicFilter:
     """
@@ -24,6 +25,7 @@ class AIThematicFilter:
 
         self.client = None
         self.client_ready = False
+        self.use_cli = False
         if api_key:
             try:
                 import anthropic
@@ -33,16 +35,20 @@ class AIThematicFilter:
                     self.client = anthropic.Anthropic(api_key=api_key)
                 self.client_ready = True
             except ImportError:
-                self.logger.warning("anthropic not installed.")
+                self.logger.warning("anthropic not installed. CLI fallback 사용.")
+                self.use_cli = True
         else:
-            self.logger.warning("ANTHROPIC_API_KEY not found.")
+            self.logger.warning("ANTHROPIC_API_KEY not found. CLI fallback 사용.")
+            self.use_cli = True
 
     def filter_candidates(self, scored_stocks: list, top_n: int = 15) -> list:
         """
         Takes a list of dicts: [{"code": "...", "name": "...", "score": 85, ...}]
         Returns the list with modified scores if AI is enabled.
         """
-        if not self.enabled or not self.client_ready or not scored_stocks:
+        if not self.enabled or not scored_stocks:
+            return scored_stocks
+        if not self.client_ready and not self.use_cli:
             return scored_stocks
 
         # Only evaluate the top_n to save API costs & time
@@ -117,13 +123,28 @@ class AIThematicFilter:
     "reasoning": "해당 뉴스는 단순 기대감이 아닌 실제 대규모 수주 공시를 포함하고 있어 진성 호재로 판단됨."
 }}
 """
-        response = self.client.messages.create(
-            model=self.model_name,
-            max_tokens=512,
-            temperature=0.1,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        text = response.content[0].text.strip()
+        text = ""
+        if self.client_ready and self.client:
+            try:
+                response = self.client.messages.create(
+                    model=self.model_name,
+                    max_tokens=512,
+                    temperature=0.1,
+                    messages=[{"role": "user", "content": prompt}]
+                )
+                text = response.content[0].text.strip()
+            except Exception as e:
+                self.logger.warning(f"[{name}] API failed: {e}. Trying CLI...")
+                text = ""
+
+        if not text:
+            try:
+                text = cli_call_claude(prompt, timeout=60).strip()
+            except ClaudeCLIError as e:
+                self.logger.warning(f"[{name}] CLI also failed: {e}. Skipping.")
+                stock["ai_reasoning"] = f"AI 분석 실패: {e}"
+                return stock
+
         if "```json" in text:
             text = text.split("```json")[1].split("```")[0].strip()
         elif "```" in text:

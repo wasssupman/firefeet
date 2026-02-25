@@ -12,6 +12,9 @@ import sys
 import time
 import math
 
+from core.encoding_setup import setup_utf8_stdout
+setup_utf8_stdout()
+
 # ─────────────────────────────────────────────────────────────
 # 헬퍼: 결과 출력
 # ─────────────────────────────────────────────────────────────

@@ -5,19 +5,34 @@ import time
 import datetime
 import threading
 import logging
+import tempfile
 from datetime import timezone, timedelta
 
+from core.encoding_setup import setup_utf8_stdout
+setup_utf8_stdout()
+
 # ── 로깅 설정 ──────────────────────────────────────────────
+os.makedirs("logs", exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     datefmt="%H:%M:%S"
 )
+
+# 에러 전용 파일 핸들러
+_error_handler = logging.FileHandler("logs/swing_errors.log", encoding="utf-8")
+_error_handler.setLevel(logging.WARNING)
+_error_handler.setFormatter(logging.Formatter(
+    "%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+))
+logging.getLogger().addHandler(_error_handler)
+
 # Claude Analyst 노이즈 억제
 logging.getLogger("ClaudeAnalyst").setLevel(logging.WARNING)
 
 # ── 중복 실행 방지 (PID 파일 락) ──────────────────────────
-_PID_FILE = "/tmp/firefeet_ai_swing.pid"
+_PID_FILE = os.path.join(tempfile.gettempdir(), "firefeet_ai_swing.pid")
 
 def _acquire_lock():
     """이미 실행 중인 프로세스가 있으면 종료."""
@@ -30,8 +45,8 @@ def _acquire_lock():
                 os.kill(int(old_pid), 0)  # signal 0 = 존재 확인만
                 print(f"[Error] AI 스윙 봇(PID: {old_pid})이 이미 실행 중입니다.")
                 sys.exit(1)
-            except (ProcessLookupError, ValueError):
-                pass  # 프로세스 없음 → 락 해제 후 계속
+            except (ProcessLookupError, ValueError, OSError):
+                pass  # 프로세스 없음 또는 Windows os.kill 미지원 → 락 해제 후 계속
     
     with open(_PID_FILE, "w") as f:
         f.write(str(os.getpid()))
@@ -64,9 +79,84 @@ def is_market_hours():
     market_end = now.replace(hour=15, minute=20, second=0, microsecond=0)
     return market_start <= now <= market_end
 
+def _startup_health_check():
+    """봇 시작 전 필수 의존성 점검"""
+    import subprocess
+
+    errors = []
+    warnings = []
+
+    # 1. Claude CLI 사용 가능 여부
+    try:
+        env = os.environ.copy()
+        env.pop("CLAUDECODE", None)
+        result = subprocess.run(
+            ["claude", "--version"],
+            capture_output=True, text=True, timeout=10,
+            env=env, encoding="utf-8", errors="replace"
+        )
+        if result.returncode != 0:
+            warnings.append("Claude CLI가 설치되어 있지만 실행 불가")
+    except FileNotFoundError:
+        warnings.append("Claude CLI 미설치 — AI 분석이 API 전용 모드로 동작합니다")
+    except subprocess.TimeoutExpired:
+        warnings.append("Claude CLI 응답 없음")
+    except Exception as e:
+        warnings.append(f"Claude CLI 확인 실패: {e}")
+
+    # 2. config 파일 존재 확인
+    required_configs = [
+        "config/secrets.yaml",
+        "config/trading_settings.yaml",
+    ]
+    for cfg in required_configs:
+        if not os.path.exists(cfg):
+            errors.append(f"필수 설정 파일 누락: {cfg}")
+
+    # 3. logs 디렉토리 쓰기 권한
+    os.makedirs("logs", exist_ok=True)
+    try:
+        test_path = os.path.join("logs", ".health_check_test")
+        with open(test_path, "w") as f:
+            f.write("test")
+        os.remove(test_path)
+    except Exception as e:
+        errors.append(f"logs/ 디렉토리 쓰기 불가: {e}")
+
+    # 4. Discord webhook 확인 (선택)
+    try:
+        loader = ConfigLoader()
+        secrets = loader.load_config()
+        if not secrets.get("DISCORD_WEBHOOK_URL"):
+            warnings.append("Discord Webhook URL 미설정 — 알림이 비활성화됩니다")
+        if not secrets.get("ANTHROPIC_API_KEY") and not secrets.get("ANTHROPIC_API_KEY", ""):
+            warnings.append("ANTHROPIC_API_KEY 미설정 — Claude CLI fallback 모드로 동작")
+    except Exception as e:
+        warnings.append(f"설정 파일 점검 중 오류: {e}")
+
+    # 결과 출력
+    if errors:
+        print("\n" + "=" * 50)
+        print("FATAL: 시작 불가")
+        for err in errors:
+            print(f"  [ERROR] {err}")
+        print("=" * 50)
+        _release_lock()
+        sys.exit(1)
+
+    if warnings:
+        print("\n--- Health Check Warnings ---")
+        for warn in warnings:
+            print(f"  [WARN] {warn}")
+        print("----------------------------\n")
+
+    print("Health Check 통과.")
+
+
 def main():
     print("🔥 Firefeet AI 스윙 봇 시동...")
-    
+    _startup_health_check()
+
     # Paper trading check
     is_paper = "--paper" in sys.argv
     if is_paper:

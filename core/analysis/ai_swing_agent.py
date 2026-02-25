@@ -160,7 +160,7 @@ class AISwingAgent:
             
         try:
             if os.path.exists(self.usage_file):
-                with open(self.usage_file, "r") as f:
+                with open(self.usage_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     if data.get("date") == today_str:
                         usage_data["count"] = data.get("count", 0)
@@ -168,14 +168,20 @@ class AISwingAgent:
             self.logger.warning(f"Error reading usage logic: {e}")
             
         if usage_data["count"] >= self.max_daily_calls:
+            self.logger.warning(f"일일 AI 호출 쿼터 초과: {usage_data['count']}/{self.max_daily_calls}")
             return False
-            
+
         usage_data["count"] += 1
-        
+
+        # 80% 경고
+        threshold_80 = int(self.max_daily_calls * 0.8)
+        if usage_data["count"] == threshold_80:
+            self.logger.warning(f"AI 호출 쿼터 80% 도달: {usage_data['count']}/{self.max_daily_calls}")
+
         try:
-            with open(self.usage_file, "w") as f:
+            with open(self.usage_file, "w", encoding="utf-8") as f:
                 json.dump(usage_data, f)
-        except Exception:
-            pass # Non-fatal if we can't write, but log usually ok
-            
+        except Exception as e:
+            self.logger.warning(f"쿼터 파일 쓰기 실패: {e}")
+
         return True
