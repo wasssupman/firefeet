@@ -1,31 +1,60 @@
-import copy
 import time
 import datetime
 import yaml
 import os
 from core.providers.kis_api import OrderType
 from core.trade_logger import TradeLogger
+from core.execution.risk_guard import RiskGuard
+from core.execution.portfolio_manager import PortfolioManager
+
+# Attributes delegated to composed services
+_RISK_ATTRS = frozenset({
+    'sold_today', 'consecutive_sl_count', 'sl_brake_until',
+    'daily_realized_pnl', '_last_reset_date',
+})
+_PORTFOLIO_ATTRS = frozenset({
+    'portfolio', 'stock_names', 'target_codes',
+})
+
 
 class FirefeetTrader:
-    def __init__(self, manager, strategy, discard_client=None, settings_path="config/trading_settings.yaml"):
+    def __init__(self, manager, strategy, discord_client=None,
+                 settings_path="config/trading_settings.yaml", data_provider_fn=None):
+        # Initialize composed services FIRST (before any delegated attribute access)
+        object.__setattr__(self, '_risk_guard', RiskGuard())
+        object.__setattr__(self, '_portfolio_mgr', PortfolioManager())
+
         self.manager = manager
         self.strategy = strategy
-        self.discord = discard_client
+        self.discord = discord_client
         self.settings_path = settings_path
-        self.target_codes = [] # List of codes to trade
-        self.stock_names = {} # {code: name}
-        self.portfolio = {} # {code: {buy_price: 1000, qty: 10}}
+        self.data_provider_fn = data_provider_fn
         self.trade_logger = TradeLogger(strategy="main")
         self.settings = self._load_settings()
         self.rules_path = "config/trading_rules.yaml"
         self.trading_rules = self._load_trading_rules()
-        self.sold_today = {}  # {code: {"time": datetime, "profitable": bool}}
-        self.consecutive_sl_count = 0      # 연속 손절 카운터
-        self.sl_brake_until = None         # 브레이크 해제 시각
-        self.daily_realized_pnl = 0        # 당일 누적 실현손익
 
         # Load initial portfolio
         self.sync_portfolio()
+
+    # ── Attribute delegation (backward compatibility) ─────────
+
+    def __getattr__(self, name):
+        if name in _RISK_ATTRS:
+            return getattr(self._risk_guard, name)
+        if name in _PORTFOLIO_ATTRS:
+            return getattr(self._portfolio_mgr, name)
+        raise AttributeError(f"'{type(self).__name__}' has no attribute '{name}'")
+
+    def __setattr__(self, name, value):
+        if name in _RISK_ATTRS:
+            setattr(self._risk_guard, name, value)
+        elif name in _PORTFOLIO_ATTRS:
+            setattr(self._portfolio_mgr, name, value)
+        else:
+            object.__setattr__(self, name, value)
+
+    # ── Config ────────────────────────────────────────────────
 
     def _load_settings(self):
         default_settings = {
@@ -71,48 +100,33 @@ class FirefeetTrader:
             print(f"[Trader] Trading rules load failed: {e}")
         return default_rules
 
+    # ── Risk delegation ───────────────────────────────────────
+
+    def reset_daily(self):
+        """일일 상태 리셋 (날짜 변경 시에만 실행)."""
+        self._risk_guard.reset_daily()
+
     def _can_buy(self, code):
-        """매수 가능 여부 판단 → (bool, reason)"""
-        # 0a. 연속SL 브레이크 체크
-        if self.sl_brake_until and datetime.datetime.now() < self.sl_brake_until:
-            return False, f"연속SL 브레이크 ({self.sl_brake_until.strftime('%H:%M')}까지)"
+        """매수 가능 여부 판단 -> (bool, reason)."""
+        return self._risk_guard.can_buy(
+            code, self.trading_rules, len(self.portfolio), self.stock_names
+        )
 
-        # 0b. 일일 손실한도 체크
-        dl_rule = self.trading_rules.get("daily_loss_limit", {})
-        if dl_rule.get("enabled", False):
-            max_loss = dl_rule.get("max_loss_amount", -50000)
-            if self.daily_realized_pnl <= max_loss:
-                return False, f"일일 손실한도 도달 ({self.daily_realized_pnl:+,.0f}원 / {max_loss:+,.0f}원)"
+    # ── Portfolio delegation ──────────────────────────────────
 
-        # 1. no_rebuy_after_sell 체크
-        rule = self.trading_rules.get("no_rebuy_after_sell", {})
-        if rule.get("enabled", True) and code in self.sold_today:
-            sold = self.sold_today[code]
-            cooldown = rule.get("cooldown_minutes", 0)
-            allow_profit = rule.get("allow_if_profitable", False)
+    def add_target(self, code, name=None):
+        self._portfolio_mgr.add_target(code, name)
 
-            if cooldown == 0:
-                name = self.stock_names.get(code, code)
-                return False, f"당일 재매수 금지 ({name})"
+    def update_target_codes(self, new_stocks):
+        self._portfolio_mgr.update_target_codes(new_stocks)
 
-            if allow_profit and sold["profitable"]:
-                elapsed = (datetime.datetime.now() - sold["time"]).total_seconds() / 60
-                if elapsed < cooldown:
-                    remaining = int(cooldown - elapsed)
-                    name = self.stock_names.get(code, code)
-                    return False, f"쿨다운 대기 ({name}, {remaining}분 남음)"
-            else:
-                name = self.stock_names.get(code, code)
-                return False, f"손실 매도 후 재매수 금지 ({name})"
+    def sync_portfolio(self):
+        self._portfolio_mgr.sync(self.manager, self.settings.get("whitelist", []))
 
-        # 2. max_holdings 체크
-        max_rule = self.trading_rules.get("max_holdings", {})
-        if max_rule.get("enabled", False):
-            max_count = max_rule.get("default_count", 5)
-            if len(self.portfolio) >= max_count:
-                return False, f"최대 보유 종목 초과 ({len(self.portfolio)}/{max_count})"
+    def _get_total_invested(self):
+        return self._portfolio_mgr.get_total_invested(self.trade_logger.calc_buy_fee)
 
-        return True, ""
+    # ── Intervals ─────────────────────────────────────────────
 
     def get_scan_interval(self):
         rule = self.trading_rules.get("scan_interval", {})
@@ -122,101 +136,46 @@ class FirefeetTrader:
         rule = self.trading_rules.get("loop_interval", {})
         return rule.get("default_seconds", 10)
 
-    def _get_total_invested(self):
-        """현재 포트폴리오 총 투자금액 계산 (수수료 포함)"""
-        total = 0
-        for p in self.portfolio.values():
-            amount = p["qty"] * p["buy_price"]
-            fee = p.get("buy_fee", self.trade_logger.calc_buy_fee(amount))
-            total += amount + fee
-        return total
-
-    def add_target(self, code, name=None):
-        if code not in self.target_codes:
-            self.target_codes.append(code)
-        if name:
-            self.stock_names[code] = name
-
-    def update_target_codes(self, new_stocks):
-        """
-        Updates the target list with new stocks (list of dicts with code and name).
-        """
-        # Keep currently held stocks
-        held_codes = list(self.portfolio.keys())
-        
-        # New codes from scanned stocks
-        new_codes = [s['code'] for s in new_stocks]
-        for s in new_stocks:
-            self.stock_names[s['code']] = s['name']
-        
-        # Merge: Unique set of (Held Stocks + New Scanned Stocks)
-        updated = sorted(list(set(held_codes + new_codes)))
-        
-        self.target_codes = updated
-        print(f"[Trader] Target list updated. Monitoring {len(self.target_codes)} stocks.")
-
-    def sync_portfolio(self):
-        """
-        Syncs local portfolio with actual account balance.
-        화이트리스트 종목은 봇 관리 대상에서 제외.
-        """
-        balance = self.manager.get_balance()
-        if not balance:
-            return
-
-        whitelist = set(self.settings.get("whitelist", []))
-        self.portfolio = {}
-        skipped = []
-        for stock in balance['holdings']:
-            code = stock['code']
-            if code in whitelist:
-                skipped.append(f"{stock.get('name', code)}({code})")
-                continue
-            self.portfolio[code] = {
-                "qty": stock['qty'],
-                "orderable_qty": stock.get('orderable_qty', stock['qty']),
-                "buy_price": float(stock.get('buy_price', 0))
-            }
-            self.stock_names[code] = stock.get('name', 'Unknown')
-        print(f"[Trader] Portfolio Synced: {len(self.portfolio)} items"
-              + (f" (whitelist 제외: {', '.join(skipped)})" if skipped else ""))
+    # ── Main Loop ─────────────────────────────────────────────
 
     def run_loop(self):
-        """
-        Main Trading Loop.
-        """
+        """Main Trading Loop."""
         print("[Trader] Starting Main Loop...")
         if self.discord:
             self.discord.send("🔥 **Firefeet Trading Bot Started!**")
-            
+
         try:
             while True:
                 # Reload settings periodically to allow on-the-fly budget changes
                 self.settings = self._load_settings()
-                
+
                 now = datetime.datetime.now()
                 time_str = now.strftime("%H%M")
-                
+
                 for code in self.target_codes:
-                    self.process_stock(code, time_str)
+                    self.process_stock(code, time_str, self.data_provider_fn)
                     time.sleep(1) # Rate limit protection
-                
+
                 time.sleep(10) # Loop interval
-                
+
         except KeyboardInterrupt:
             print("[Trader] Stopping...")
 
-    def process_stock(self, code, time_str, data_provider_fn):
+    def process_stock(self, code, time_str, data_provider_fn=None):
         if code in set(self.settings.get("whitelist", [])):
             return
         name = self.stock_names.get(code, "Unknown")
 
         # 1. Get Current Status
         is_held = code in self.portfolio and self.portfolio[code]['qty'] > 0
-        
+
         # 1.5 Fetch Data via Provider
+        provider = data_provider_fn or self.data_provider_fn
+        if provider is None:
+            print(f"[Trader] {name}({code}) data_provider_fn 미설정 — 스킵")
+            return
         try:
-            df, current_price = data_provider_fn(code)
+            df, current_price = provider(code)
             if df is None or current_price is None:
                 return
         except Exception as e:
@@ -267,7 +226,7 @@ class FirefeetTrader:
             max_pos_amount = pos_rule.get("default_amount", total_budget * 0.15)
             max_per_stock = min(max_per_stock, max_pos_amount)
 
-        # 상위 N개 종목에 집중 배분 (실제 돌파 가능 종목에 포지션 집중)
+        # 상위 N개 종목에 집중 배분
         max_concurrent_targets = self.settings.get("max_concurrent_targets", 3)
         unheld = [c for c in self.target_codes
                   if c not in self.portfolio and c not in self.sold_today]
@@ -294,12 +253,18 @@ class FirefeetTrader:
         if order_no:
             print(f"  -> Order Placed! No: {order_no}")
             buy_info = self.trade_logger.log_buy(code, name, qty, current_price)
-            self.portfolio[code] = {
-                "qty": qty,
-                "orderable_qty": qty,
-                "buy_price": current_price,
-                "buy_fee": buy_info["fee"],
-            }
+            # 주문 접수 후 체결 반영을 위해 잔고 동기화
+            time.sleep(2)
+            self.sync_portfolio()
+            if code not in self.portfolio:
+                print(f"  ⚠️ {name}({code}) 체결 미확인 — 임시 포트폴리오 기록")
+                self.portfolio[code] = {
+                    "qty": qty,
+                    "orderable_qty": 0,
+                    "buy_price": current_price,
+                    "buy_fee": buy_info["fee"],
+                    "unconfirmed": True,
+                }
             if self.discord:
                 self.discord.send(
                     f"⚡ **BUY** {name}({code}) {qty}주 @ {current_price:,}원\n"
@@ -351,30 +316,8 @@ class FirefeetTrader:
                     f"실현손익: {sell_info['realized_pnl']:+,}원 ({sell_info['pnl_rate']:+.2f}%) | "
                     f"수수료: {sell_info['sell_fee']:,}원"
                 )
-            self.sold_today[code] = {
-                "time": datetime.datetime.now(),
-                "profitable": sell_info["realized_pnl"] > 0,
-            }
-            # 누적 실현손익 추적
-            self.daily_realized_pnl += sell_info['realized_pnl']
-
-            # 연속 손절 카운터 업데이트
-            if signal == "SELL_STOP_LOSS":
-                self.consecutive_sl_count += 1
-                sl_rule = self.trading_rules.get("consecutive_sl_brake", {})
-                max_consecutive = sl_rule.get("max_consecutive", 3)
-                if sl_rule.get("enabled", False) and self.consecutive_sl_count >= max_consecutive:
-                    cooldown = sl_rule.get("cooldown_minutes", 30)
-                    self.sl_brake_until = datetime.datetime.now() + datetime.timedelta(minutes=cooldown)
-                    print(f"🛑 연속 {max_consecutive}회 손절 — {cooldown}분간 매매 중단 ({self.sl_brake_until.strftime('%H:%M')}까지)")
-                    if self.discord:
-                        self.discord.send(
-                            f"🛑 **연속 {max_consecutive}회 손절 브레이크 발동**\n"
-                            f"{cooldown}분간 매매 중단 ({self.sl_brake_until.strftime('%H:%M')}까지)\n"
-                            f"당일 누적손익: {self.daily_realized_pnl:+,.0f}원"
-                        )
-                    self.consecutive_sl_count = 0
-            elif signal == "SELL_TAKE_PROFIT":
-                self.consecutive_sl_count = 0
-
+            self._risk_guard.record_sell(
+                code, signal, sell_info['realized_pnl'],
+                self.trading_rules, self.discord
+            )
             del self.portfolio[code]

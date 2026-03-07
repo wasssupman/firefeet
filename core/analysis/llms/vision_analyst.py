@@ -99,8 +99,8 @@ class VisionAnalyst:
         except Exception as e:
             logger.error(f"[{name}({code})] VisionAnalyst error: {e}")
             return {
-                "action": "CONFIRM",
-                "confidence": 40,
-                "risk_level": "MEDIUM",
-                "reason": f"Vision check failed: {str(e)}"
+                "action": "REJECT",
+                "confidence": 0,
+                "risk_level": "HIGH",
+                "reason": f"Vision check failed (안전 기각): {str(e)}"
             }

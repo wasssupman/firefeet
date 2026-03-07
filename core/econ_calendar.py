@@ -4,6 +4,7 @@ import yaml
 import datetime
 import os
 from datetime import timedelta
+from zoneinfo import ZoneInfo
 from bs4 import BeautifulSoup
 import re
 
@@ -86,7 +87,7 @@ class EconCalendar:
                         day_val = parts[2]
                         dt = datetime.datetime.strptime(f"{month_str} {day_val} {year}", "%b %d %Y")
                         current_date_str = dt.strftime("%Y-%m-%d")
-                except:
+                except (ValueError, IndexError):
                     pass
                 continue
 
@@ -133,11 +134,14 @@ class EconCalendar:
                     try:
                         # "8:30 am" or "10:50 am"
                         t_clean = time_val.lower().replace(' ', '')
-                        et_dt = datetime.datetime.strptime(f"{current_date_str} {t_clean}", "%Y-%m-%d %I:%M%p")
-                        # Fixed offset for ET to KST in Feb (Standard: UTC-5, KST: UTC+9 -> +14h)
-                        kst_dt = et_dt + datetime.timedelta(hours=14)
+                        et_naive = datetime.datetime.strptime(f"{current_date_str} {t_clean}", "%Y-%m-%d %I:%M%p")
+                        # DST 자동 대응: zoneinfo로 ET→KST 변환
+                        et_tz = ZoneInfo("America/New_York")
+                        kst_tz = ZoneInfo("Asia/Seoul")
+                        et_dt = et_naive.replace(tzinfo=et_tz)
+                        kst_dt = et_dt.astimezone(kst_tz)
                         kst_time = kst_dt.strftime("%H:%M (KST)")
-                    except:
+                    except (ValueError, KeyError):
                         pass
 
                 events.append({
@@ -162,8 +166,8 @@ class EconCalendar:
             scraper = NewsScraper()
             news_items = scraper.search_news(event_name)
             results["news"] = [n['title'] for n in news_items[:2]]
-        except:
-            pass
+        except Exception as e:
+            print(f"[EconCalendar] 뉴스 반응 분석 실패 ({event_name}): {e}")
         return results
 
     def generate_report_section(self):
@@ -231,8 +235,8 @@ class EconCalendar:
                         analysis = self.analyze_reaction(name)
                         if analysis["news"]:
                             released_section.append(f"  > 📰 관련 뉴스: {analysis['news'][0]}")
-                    except:
-                        pass
+                    except Exception as e:
+                        print(f"[EconCalendar] 반응 분석 실패 ({name}): {e}")
                 released_section.append("")
 
             if g_upcoming:

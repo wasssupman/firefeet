@@ -22,17 +22,22 @@ class StockScreener:
         default = {
             "weights": {
                 "volume_surge": 20,
-                "price_momentum": 15,
+                "price_momentum": 10,
                 "ma_alignment": 20,
                 "supply_demand": 20,
                 "breakout_proximity": 15,
-                "intraday_strength": 10,
+                "intraday_strength": 5,
+                "contraction_bonus": 10,   # ATR 수축 보너스
             },
             "pre_filter": {
                 "min_volume": 500000,
                 "max_price": 500000,
                 "min_change_rate": -2.0,
                 "max_change_rate": 15.0,
+            },
+            "trend_filter": {
+                "enabled": True,
+                "min_ohlc_days": 120,  # MA120 계산에 필요한 최소 데이터
             },
             "output": {
                 "min_score": 30,
@@ -214,12 +219,60 @@ class StockScreener:
             return 20
         return 0  # 고점 대비 3%+ 하락 → 부적격
 
+    def _check_ma120_trend(self, ohlc):
+        """
+        MA120 추세 필터: 개별 종목이 상승 추세(Stage 2)에 있는지 확인.
+        Returns: (passes: bool, reason: str)
+        - price > MA120 AND MA120 기울기 > 0 → 통과
+        - 데이터 부족 시 통과 (필터 비활성화)
+        """
+        if ohlc is None or (hasattr(ohlc, 'empty') and ohlc.empty) or len(ohlc) < 120:
+            return True, "데이터 부족 (MA120 필터 비활성)"
+
+        price = float(ohlc.iloc[0]['close'])
+        ma120 = ohlc.iloc[:120]['close'].astype(float).mean()
+
+        if price <= ma120:
+            return False, f"MA120 하회 (가격:{price:,.0f} < MA120:{ma120:,.0f})"
+
+        # MA120 기울기: 현재 MA120 vs 20일 전 MA120
+        if len(ohlc) >= 140:
+            ma120_20d_ago = ohlc.iloc[20:140]['close'].astype(float).mean()
+            if ma120 < ma120_20d_ago:
+                return False, f"MA120 하락 중 (현재:{ma120:,.0f} < 20일전:{ma120_20d_ago:,.0f})"
+
+        return True, "Stage 2 확인"
+
+    def _score_contraction_bonus(self, ohlc):
+        """
+        ATR 수축 보너스: ATR(5)/ATR(20) 비율로 변동성 수축 정도 측정.
+        < 0.5 = 극도의 수축 (100점)
+        < 0.8 = 수축 중 (70점)
+        0.8~1.0 = 보통 (30점)
+        > 1.0 = 확장 중 (0점)
+        """
+        if ohlc is None or (hasattr(ohlc, 'empty') and ohlc.empty) or len(ohlc) < 21:
+            return 0
+
+        from core.analysis.technical import VolatilityBreakoutStrategy
+        ratio = VolatilityBreakoutStrategy().get_contraction_ratio(ohlc)
+
+        if ratio is None:
+            return 0
+        if ratio < 0.5:
+            return 100  # 극도의 수축 → 폭발적 돌파 임박 가능
+        if ratio < 0.8:
+            return 70   # 수축 중 → 돌파 시 가치 있는 신호
+        if ratio <= 1.0:
+            return 30   # 보통 → 약간의 가산점
+        return 0        # 이미 확장 중 → 보너스 없음
+
     # ────────────────────── Main Scoring ──────────────────────
 
     def score_stock(self, stock, ohlc, supply, current_data):
         """종목 종합 스코어 계산 (0~100점). 데이터는 외부에서 주입됨."""
         if ohlc is None or (hasattr(ohlc, 'empty') and ohlc.empty) or current_data is None:
-            return 0
+            return None
         code = stock["code"]
         weights = self.settings["weights"]
 
@@ -231,6 +284,7 @@ class StockScreener:
             "supply_demand": self._score_supply_demand(supply),
             "breakout_proximity": self._score_breakout_proximity(stock, ohlc),
             "intraday_strength": self._score_intraday_strength(stock, current_data),
+            "contraction_bonus": self._score_contraction_bonus(ohlc),
         }
 
         # Weighted total (0~100)
@@ -273,6 +327,31 @@ class StockScreener:
             print("[Screener] No candidates after pre-filter")
             return []
 
+        # 1.5 MA120 Trend Filter (추세 확인)
+        trend_cfg = self.settings.get("trend_filter", {})
+        if trend_cfg.get("enabled", True):
+            trend_passed = []
+            trend_rejected = []
+            for stock in candidates:
+                try:
+                    ohlc, _, _ = data_provider_fn(stock["code"])
+                    passes, reason = self._check_ma120_trend(ohlc)
+                    if passes:
+                        trend_passed.append(stock)
+                    else:
+                        trend_rejected.append((stock.get("name", stock["code"]), reason))
+                except Exception:
+                    trend_passed.append(stock)  # 에러 시 통과 (보수적)
+            if trend_rejected:
+                print(f"[Screener] MA120 추세 필터: {len(trend_rejected)}종목 제외")
+                for name, reason in trend_rejected[:5]:
+                    print(f"  ❌ {name}: {reason}")
+            candidates = trend_passed
+
+            if not candidates:
+                print("[Screener] No candidates after MA120 trend filter")
+                return []
+
         # 2. Score
         print(f"[Screener] Scoring {len(candidates)} stocks...")
         results = []
@@ -283,7 +362,8 @@ class StockScreener:
                 # 콜백을 통해 데이터 요청
                 ohlc, supply, current_data = data_provider_fn(stock["code"])
                 result = self.score_stock(stock, ohlc, supply, current_data)
-                results.append(result)
+                if result is not None:
+                    results.append(result)
             except Exception as e:
                 import traceback
                 print(f"  [Screener] Error scoring {name}: {e}")
@@ -356,7 +436,7 @@ class StockScreener:
             lines.append(
                 f"   Vol:{d['volume_surge']} Mom:{d['price_momentum']:.0f} "
                 f"MA:{d['ma_alignment']:.0f} Sup:{d['supply_demand']} "
-                f"Brk:{d['breakout_proximity']} Str:{d.get('intraday_strength', '-')}"
+                f"Brk:{d['breakout_proximity']} Ctr:{d.get('contraction_bonus', '-')} Str:{d.get('intraday_strength', '-')}"
             )
 
         lines.append(

@@ -1,7 +1,6 @@
 import time
 import datetime
 from datetime import timezone, timedelta
-import threading
 import yaml
 import os
 import json
@@ -19,6 +18,7 @@ from core.scalping.scalp_screener import ScalpScreener
 from core.scalping.strategy_selector import StrategySelector
 from core.technical.candle_history import CandleHistory, Candle
 from core.technical.analyzer import IntradayAnalyzer
+from core.db.writer import BackgroundWriter
 
 
 class ScalpEngine:
@@ -65,6 +65,11 @@ class ScalpEngine:
 
         # 로깅
         self.trade_logger = TradeLogger(strategy="scalp")
+        self.db_writer = BackgroundWriter()
+
+        # Cross-bot position lock
+        from core.db.position_registry import PositionRegistry
+        self.position_registry = PositionRegistry()
 
         # 포지션 관리
         self.positions = {}  # {code: {qty, buy_price, buy_time, order_no, trailing_high}}
@@ -79,10 +84,18 @@ class ScalpEngine:
         # 실행 상태
         self._running = False
         self._eval_interval = self.settings.get("eval_interval_ms", 1500) / 1000.0
+        self._last_status_log = 0       # 상태 로그 타이밍
+        self._last_order_check = 0      # 주문 조회 타이밍
+        self._processed_orders = set()  # 이중 체결 처리 방지 (notice + polling 경합)
 
         # 매도 후 재진입 쿨다운 {code: cooldown_until_timestamp}
         self._sell_cooldown_path = "logs/sell_cooldown.json"
         self._sell_cooldown = self._load_sell_cooldown()
+
+        # 시장 패닉 가드
+        self._market_panic_active = False
+        self._last_panic_check = 0
+        self._target_change_rates = {}  # {code: change_rate}
 
         # WebSocket 콜백 등록
         self.kis_ws.on_tick(self._on_tick)
@@ -172,6 +185,8 @@ class ScalpEngine:
     def _on_notice(self, notice_data):
         """체결통보 수신 → 주문 상태 업데이트"""
         order_no = notice_data.get("order_no", "")
+        if order_no in self._processed_orders:
+            return  # 이미 처리된 주문 (polling과 notice 경합 방지)
         if order_no in self.pending_orders:
             pending = self.pending_orders[order_no]
             code = pending["code"]
@@ -190,14 +205,19 @@ class ScalpEngine:
                         "trailing_high": price,
                         "profile": pending.get("profile"),  # 청산 시 재사용
                     }
+                    self.position_registry.register(code, "scalp", qty, price)
                     confidence = pending.get("confidence", 0)
-                    self.trade_logger.log_scalp_buy(code, name, qty, price, confidence)
+                    self.trade_logger.log_scalp_buy(code, name, qty, price, confidence,
+                        **pending.get("log_extra", {}))
+                    self.db_writer.update_status(order_no, "FILLED",
+                        filled_qty=qty, filled_price=price)
                     print(f"[ScalpEngine] ✅ 매수 체결: {name}({code}) {qty}주 @ {price:,}원")
                 elif pending["type"] == "SELL":
                     buy_price = pending.get("buy_price", 0)
                     signal = pending.get("signal", "SCALP_SELL")
-                    sell_info = self.trade_logger.log_scalp_sell(code, name, qty, price, buy_price, signal)
-                    self.risk_manager.record_trade(sell_info["realized_pnl"])
+                    sell_info = self.trade_logger.log_scalp_sell(code, name, qty, price, buy_price, signal,
+                        **pending.get("log_extra", {}))
+                    self.risk_manager.record_trade(sell_info["realized_pnl"], code=code)
 
                     if self.discord:
                         self.discord.send(
@@ -205,14 +225,58 @@ class ScalpEngine:
                             f"실현손익: {sell_info['realized_pnl']:+,}원 ({sell_info['pnl_rate']:+.2f}%)"
                         )
 
+                    self.db_writer.update_status(order_no, "FILLED",
+                        filled_qty=qty, filled_price=price,
+                        realized_pnl=sell_info["realized_pnl"],
+                        pnl_rate=sell_info["pnl_rate"],
+                        exit_reason=signal)
                     self.positions.pop(code, None)
+                    self.position_registry.remove(code, "scalp")
                     # 체결 통보 경로에서도 재진입 쿨다운 등록
                     sell_cooldown_secs = self.settings.get("sell_cooldown_seconds", 300)
                     self._sell_cooldown[code] = time.time() + sell_cooldown_secs
                     self._save_sell_cooldown()
                     print(f"[ScalpEngine] ✅ 매도 체결: {name}({code}) {qty}주 @ {price:,}원")
 
+                self._processed_orders.add(order_no)
                 del self.pending_orders[order_no]
+
+    # ── Market Panic Guard ──────────────────────────
+
+    def _check_market_panic(self):
+        """시장 패닉 감지: 타겟 종목 전반 하락 시 신규 진입 차단"""
+        if not self._target_change_rates:
+            return
+
+        panic_cfg = self.settings.get("panic_guard", {})
+        if not panic_cfg.get("enabled", True):
+            self._market_panic_active = False
+            return
+
+        avg_threshold = panic_cfg.get("avg_decline_threshold", -2.0)
+        crash_pct_threshold = panic_cfg.get("crash_stock_pct", 50)
+        crash_stock_threshold = panic_cfg.get("crash_stock_threshold", -3.0)
+
+        rates = list(self._target_change_rates.values())
+        if not rates:
+            return
+
+        avg_rate = sum(rates) / len(rates)
+        crash_count = sum(1 for r in rates if r <= crash_stock_threshold)
+        crash_ratio = (crash_count / len(rates)) * 100
+
+        # 패닉 조건: 평균 하락률 임계값 초과 OR 급락 종목 비율 50% 초과
+        panic_triggered = avg_rate <= avg_threshold or crash_ratio >= crash_pct_threshold
+
+        if panic_triggered and not self._market_panic_active:
+            self._market_panic_active = True
+            print(f"[ScalpEngine] 🚨 시장 패닉 가드 발동 — "
+                  f"평균 변동률={avg_rate:.2f}% (임계값={avg_threshold}%), "
+                  f"급락종목={crash_count}/{len(rates)} ({crash_ratio:.0f}%) — 신규 진입 전면 차단")
+        elif not panic_triggered and self._market_panic_active:
+            self._market_panic_active = False
+            print(f"[ScalpEngine] ✅ 시장 패닉 가드 해제 — "
+                  f"평균 변동률={avg_rate:.2f}%, 급락종목={crash_count}/{len(rates)}")
 
     # ── Target Management ──────────────────────────
 
@@ -220,9 +284,10 @@ class ScalpEngine:
         """종목 목록 업데이트 + WebSocket 구독 로테이션"""
         filtered = self.screener.filter_stocks(stocks, self.orderbook_analyzer)
 
-        # 이름 업데이트
+        # 이름 업데이트 + 패닉 가드용 변동률 수집
         for s in filtered:
             self.stock_names[s["code"]] = s.get("name", s["code"])
+            self._target_change_rates[s["code"]] = s.get("change_rate", 0)
 
         # adaptive pool rotation 카운터 초기화 (종목 풀 갱신 시 재평가 기회 부여)
         self._low_composite_cycles.clear()
@@ -285,8 +350,6 @@ class ScalpEngine:
         time_str = now.strftime("%H%M")
 
         # 30초마다 상태 로그
-        if not hasattr(self, '_last_status_log'):
-            self._last_status_log = 0
         if time.time() - self._last_status_log >= 30:
             data_codes = sum(1 for c in self.target_codes
                              if self.tick_buffer.has_enough_data(c, 30))
@@ -299,6 +362,13 @@ class ScalpEngine:
         # 설정 리로드
         self.settings = self._load_settings()
         self.risk_manager.reload_rules()
+
+        # 시장 패닉 가드 주기적 체크 (30초마다)
+        panic_cfg = self.settings.get("panic_guard", {})
+        panic_interval = panic_cfg.get("check_interval", 30)
+        if time.time() - self._last_panic_check >= panic_interval:
+            self._check_market_panic()
+            self._last_panic_check = time.time()
 
         # 0. 런타임 불변조건 가드
         _max_pos = self.risk_manager._get_max_positions()
@@ -331,20 +401,23 @@ class ScalpEngine:
             self.stop()
             return
 
-        # 2. 서킷브레이커 체크 — 전 포지션 청산
+        # 2. 서킷브레이커 체크 — 쿨다운 해제 or 전 포지션 청산
         if self.risk_manager.circuit_broken:
-            if self.positions:
-                print("[ScalpEngine] 🚨 서킷브레이커 — 전 포지션 청산")
-                self._force_exit_all("SCALP_SELL_CIRCUIT")
-                if self.discord:
-                    summary = self.risk_manager.get_daily_summary()
-                    self.discord.send(
-                        f"🚨 **서킷브레이커 발동**\n"
-                        f"일일 손익: {summary['daily_pnl']:+,}원 | "
-                        f"연속손실: {summary['consecutive_losses']}회 | "
-                        f"거래: {summary['trade_count']}건"
-                    )
-            return
+            if self.risk_manager.check_circuit_reset():
+                pass  # 쿨다운 해제됨 → 아래 매매 로직 계속 진행
+            else:
+                if self.positions:
+                    print("[ScalpEngine] 🚨 서킷브레이커 — 전 포지션 청산")
+                    self._force_exit_all("SCALP_SELL_CIRCUIT")
+                    if self.discord:
+                        summary = self.risk_manager.get_daily_summary()
+                        self.discord.send(
+                            f"🚨 **서킷브레이커 발동**\n"
+                            f"일일 손익: {summary['daily_pnl']:+,}원 | "
+                            f"연속손실: {summary['consecutive_losses']}회 | "
+                            f"거래: {summary['trade_count']}건"
+                        )
+                return
 
         # 3. 미체결 주문 타임아웃 관리
         self._manage_pending_orders()
@@ -371,12 +444,20 @@ class ScalpEngine:
         if (len(self.positions) + pending_buys) >= max_positions:
             return
 
+        # 시장 패닉 가드: 타겟 종목 전반 하락 시 신규 진입 차단
+        if self._market_panic_active:
+            return
+
         # 주문 쿨다운 체크
         if code in self._order_cooldown and time.time() < self._order_cooldown[code]:
             return
 
         # 매도 후 재진입 쿨다운 체크 (5분)
         if code in self._sell_cooldown and time.time() < self._sell_cooldown[code]:
+            return
+
+        # Cross-bot position lock: 다른 봇이 보유 중이면 진입 차단
+        if self.position_registry.is_held_by_other(code, "scalp"):
             return
 
         # 데이터 충분성 체크
@@ -452,6 +533,11 @@ class ScalpEngine:
 
         position_value = qty * price
 
+        # 종목별 한도 체크
+        stock_ok, stock_reason = self.risk_manager.can_trade_stock(code)
+        if not stock_ok:
+            return
+
         # 리스크 체크
         can_enter, reason = self.risk_manager.can_enter(code, position_value, self.positions)
         if not can_enter:
@@ -476,7 +562,27 @@ class ScalpEngine:
             return
 
         if order_no:
+            # 매수 시점 카운트 (BUY-SELL 비동기 갭 방지)
+            self.risk_manager.record_buy(code)
+
             # 주문 접수 → pending_orders에 등록 (체결 확인은 _manage_pending_orders에서)
+            sigs = result.get("signals", {})
+            log_extra = {
+                "strategy": profile.name if profile else "",
+                "composite": round(result["composite"], 2),
+                "threshold": round(result["threshold"], 3),
+                "temperature": self.strategy.temperature_level,
+                "sig_vwap": round(sigs.get("vwap_reversion", 0), 1),
+                "sig_ob": round(sigs.get("orderbook_pressure", 0), 1),
+                "sig_mom": round(sigs.get("momentum_burst", 0), 1),
+                "sig_vol": round(sigs.get("volume_surge", 0), 1),
+                "sig_trend": round(sigs.get("micro_trend", 0), 1),
+                "spread_bps": result.get("penalties", {}).get("spread", ""),
+                "penalty": result.get("penalties", {}).get("combined", ""),
+                "tp_pct": result.get("take_profit", ""),
+                "sl_pct": result.get("stop_loss", ""),
+                "vwap_dist": round(self.tick_buffer.get_vwap_distance(code), 4),
+            }
             self.pending_orders[order_no] = {
                 "code": code,
                 "type": "BUY",
@@ -485,7 +591,28 @@ class ScalpEngine:
                 "time": time.time(),
                 "confidence": result["confidence"],
                 "profile": profile,
+                "log_extra": log_extra,
             }
+            self.db_writer.log_decision({
+                "timestamp": datetime.datetime.now(KST).isoformat(),
+                "bot_type": "scalp",
+                "code": code,
+                "action": "BUY",
+                "status": "PENDING",
+                "order_no": order_no,
+                "requested_qty": qty,
+                "requested_price": order_price,
+                "confidence": result["confidence"],
+                "temperature": getattr(self.strategy, '_temperature_score', None),
+                "temperature_level": self.strategy.temperature_level,
+                "sig_vwap": sigs.get("vwap_reversion"),
+                "sig_ob": sigs.get("orderbook_pressure"),
+                "sig_mom": sigs.get("momentum_burst"),
+                "sig_vol": sigs.get("volume_surge"),
+                "sig_trend": sigs.get("micro_trend"),
+                "composite": result["composite"],
+                "strategy_profile": profile.name if profile else None,
+            })
             print(f"[ScalpEngine] 📋 매수 주문 접수: {name}({code}) {qty}주 @ {order_price:,}원 "
                   f"(주문번호={order_no}, conf={result['confidence']:.3f}, strategy={profile.name})")
 
@@ -606,6 +733,15 @@ class ScalpEngine:
             self._save_sell_cooldown()
 
             # 매도 주문 접수 → pending_orders에 등록, 포지션에 selling 플래그
+            pos = self.positions.get(code, {})
+            hold_secs = time.time() - pos.get("buy_time", time.time())
+            peak = (pos.get("trailing_high", buy_price) - buy_price) / buy_price * 100 if buy_price > 0 else 0
+            sell_log_extra = {
+                "strategy": pos.get("profile").name if pos.get("profile") else "",
+                "temperature": self.strategy.temperature_level,
+                "hold_seconds": round(hold_secs, 1),
+                "peak_profit_pct": round(peak, 3),
+            }
             self.pending_orders[order_no] = {
                 "code": code,
                 "type": "SELL",
@@ -614,7 +750,21 @@ class ScalpEngine:
                 "time": time.time(),
                 "signal": signal,
                 "buy_price": buy_price,
+                "log_extra": sell_log_extra,
             }
+            self.db_writer.log_decision({
+                "timestamp": datetime.datetime.now(KST).isoformat(),
+                "bot_type": "scalp",
+                "code": code,
+                "action": "SELL",
+                "status": "PENDING",
+                "order_no": order_no,
+                "requested_qty": qty,
+                "requested_price": order_price if order_price > 0 else self.tick_buffer.get_latest_price(code),
+                "temperature_level": self.strategy.temperature_level,
+                "exit_reason": signal,
+                "strategy_profile": pos.get("profile").name if pos.get("profile") else None,
+            })
             if code in self.positions:
                 self.positions[code]["selling"] = True
             print(f"[ScalpEngine] 📋 매도 주문 접수: {name}({code}) {qty}주 (주문번호={order_no})")
@@ -629,7 +779,7 @@ class ScalpEngine:
         now = time.time()
 
         # API 호출 빈도 제한 (3초마다)
-        if hasattr(self, '_last_order_check') and now - self._last_order_check < 3:
+        if now - self._last_order_check < 3:
             return
         self._last_order_check = now
 
@@ -645,6 +795,10 @@ class ScalpEngine:
         timeout = 15  # 15초 타임아웃
 
         for odno in list(self.pending_orders.keys()):
+            if odno in self._processed_orders:
+                self.pending_orders.pop(odno, None)
+                continue  # notice 콜백에서 이미 처리됨
+
             pending = self.pending_orders[odno]
             code = pending["code"]
             name = self.stock_names.get(code, code)
@@ -667,8 +821,12 @@ class ScalpEngine:
                             "trailing_high": avg_price,
                             "profile": profile,
                         }
+                        self.position_registry.register(code, "scalp", filled_qty, avg_price)
                         confidence = pending.get("confidence", 0)
-                        self.trade_logger.log_scalp_buy(code, name, filled_qty, avg_price, confidence)
+                        self.trade_logger.log_scalp_buy(code, name, filled_qty, avg_price, confidence,
+                            **pending.get("log_extra", {}))
+                        self.db_writer.update_status(odno, "FILLED",
+                            filled_qty=filled_qty, filled_price=avg_price)
                         print(f"[ScalpEngine] ✅ 매수 체결: {name}({code}) "
                               f"{filled_qty}주 @ {avg_price:,.0f}원 (strategy={profile.name if profile else '?'})")
                         if self.discord:
@@ -681,10 +839,16 @@ class ScalpEngine:
                         buy_price = pending.get("buy_price", 0)
                         signal = pending.get("signal", "SCALP_SELL")
                         sell_info = self.trade_logger.log_scalp_sell(
-                            code, name, filled_qty, avg_price, buy_price, signal
-                        )
-                        self.risk_manager.record_trade(sell_info["realized_pnl"])
+                            code, name, filled_qty, avg_price, buy_price, signal,
+                            **pending.get("log_extra", {}))
+                        self.risk_manager.record_trade(sell_info["realized_pnl"], code=code)
+                        self.db_writer.update_status(odno, "FILLED",
+                            filled_qty=filled_qty, filled_price=avg_price,
+                            realized_pnl=sell_info["realized_pnl"],
+                            pnl_rate=sell_info["pnl_rate"],
+                            exit_reason=signal)
                         self.positions.pop(code, None)
+                        self.position_registry.remove(code, "scalp")
 
                         sell_cooldown_secs = self.settings.get("sell_cooldown_seconds", 300)
                         self._sell_cooldown[code] = now + sell_cooldown_secs
@@ -699,6 +863,7 @@ class ScalpEngine:
                                 f"실현손익: {sell_info['realized_pnl']:+,}원 ({sell_info['pnl_rate']:+.2f}%)"
                             )
 
+                    self._processed_orders.add(odno)
                     del self.pending_orders[odno]
                     continue
 
@@ -711,6 +876,8 @@ class ScalpEngine:
                 except Exception as e:
                     print(f"[ScalpEngine] 주문 취소 실패 ({odno}): {e}")
 
+                self.db_writer.update_status(odno, "EXPIRED")
+
                 # 매도 pending이면 selling 플래그 해제
                 if pending["type"] == "SELL":
                     pos = self.positions.get(code)
@@ -722,7 +889,8 @@ class ScalpEngine:
     # ── Force Exit ──────────────────────────
 
     def _force_exit_all(self, signal="SCALP_SELL_EOD"):
-        """전 포지션 시장가 청산"""
+        """전 포지션 시장가 청산 (실패 종목은 positions에 유지)"""
+        exited = set()
         for code in list(self.positions.keys()):
             pos = self.positions[code]
             name = self.stock_names.get(code, code)
@@ -744,12 +912,25 @@ class ScalpEngine:
                 if current_price <= 0:
                     current_price = buy_price
 
+                hold_secs = time.time() - pos.get("buy_time", time.time())
+                peak = (pos.get("trailing_high", buy_price) - buy_price) / buy_price * 100 if buy_price > 0 else 0
                 sell_info = self.trade_logger.log_scalp_sell(
-                    code, name, qty, current_price, buy_price, signal
+                    code, name, qty, current_price, buy_price, signal,
+                    hold_seconds=round(hold_secs, 1),
+                    peak_profit_pct=round(peak, 3),
+                    strategy=pos.get("profile").name if pos.get("profile") else "",
+                    temperature=self.strategy.temperature_level,
                 )
-                self.risk_manager.record_trade(sell_info["realized_pnl"])
+                self.risk_manager.record_trade(sell_info["realized_pnl"], code=code)
+                exited.add(code)
+            else:
+                print(f"[ScalpEngine] 강제 청산 주문번호 없음 ({name}) — 수동 확인 필요")
 
-        self.positions.clear()
+        for code in exited:
+            del self.positions[code]
+        if exited:
+            self.position_registry.remove_all("scalp")
+        self.db_writer.flush()
 
         if self.discord:
             summary = self.risk_manager.get_daily_summary()
@@ -775,10 +956,12 @@ class ScalpEngine:
         self.orderbook_analyzer.reset_all()
         self.candle_history.reset()
         self.positions.clear()
+        self.position_registry.remove_all("scalp")
         self.pending_orders.clear()
         self._sell_cooldown.clear()
         self._order_cooldown.clear()
         self._low_composite_cycles.clear()
+        self._processed_orders.clear()
         self._save_sell_cooldown()  # 빈 상태로 초기화
         print("[ScalpEngine] 일일 리셋 완료")
 

@@ -4,11 +4,12 @@
 # 평가 기준별 가중치 (합계 100)
 weights:
   volume_surge: 20        # 거래량 급증 (5일 평균 대비)
-  price_momentum: 15      # 가격 모멘텀 (등락률 sweet spot)
+  price_momentum: 10      # 가격 모멘텀 (등락률 sweet spot)
   ma_alignment: 20        # 이동평균 정배열 (P > 5MA > 20MA)
   supply_demand: 20       # 수급 (외국인+기관 순매수)
   breakout_proximity: 15  # 돌파 근접도 (현재가 vs 목표가)
-  intraday_strength: 10   # 장중 체력 (현재가 vs 장중 고가)
+  intraday_strength: 5    # 장중 체력 (현재가 vs 장중 고가)
+  contraction_bonus: 10   # ATR 수축 보너스 (변동성 압축 → 돌파 신호 품질)
 
 # Pre-Filter (API 호출 없이 Scanner 데이터만으로 사전 제거)
 pre_filter:
@@ -16,6 +17,11 @@ pre_filter:
   max_price: 500000       # 최대 현재가 (50만원)
   min_change_rate: -2.0   # 최소 등락률 (%)
   max_change_rate: 15.0   # 최대 등락률 (%)
+
+# MA120 추세 필터 (Stage 2 확인)
+trend_filter:
+  enabled: true
+  min_ohlc_days: 120      # MA120 계산 최소 데이터 (부족 시 필터 비활성)
 
 # 스크리너 출력
 output:

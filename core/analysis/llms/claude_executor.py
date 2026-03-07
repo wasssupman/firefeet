@@ -11,10 +11,11 @@ class ClaudeExecutor(IExecutorLLM):
     Responsible for acting as the strict Chief Risk Officer (CRO), parsing the Analyst Memo,
     cross-checking hard facts, and generating a strictly typed JSON decision.
     """
-    def __init__(self, model_name="claude-3-5-sonnet-20241022", temperature=0.0):
+    def __init__(self, model_name="claude-3-5-sonnet-20241022", temperature=0.0, compact_prompt=False):
         self.logger = logging.getLogger("ClaudeExecutor")
         self.model_name = model_name
         self.temperature = temperature # 0.0 for strict decision making
+        self.compact_prompt = compact_prompt
         
         loader = ConfigLoader()
         secrets = loader.load_config()
@@ -42,11 +43,32 @@ class ClaudeExecutor(IExecutorLLM):
             return response_text
         return self._parse_json(response_text)
 
-    def _build_executor_prompt(self, code: str, name: str, memo: str, facts: dict) -> str:
-        
+    def _build_compact_executor_prompt(self, code: str, name: str, memo: str, facts: dict) -> str:
+        """CLI fallback용 경량 프롬프트 (~1KB). 메모를 요약하여 토큰 절약."""
         curr_price = facts.get("current_price", 0)
         score = facts.get("score", 0)
-        
+        # 메모에서 핵심만 추출 (최대 500자)
+        memo_summary = memo[:500] if len(memo) > 500 else memo
+
+        return f"""리스크 관리자(CRO). {name}({code}) 매매 판단.
+
+현재가:{curr_price} 스코어:{score}
+
+[애널리스트 요약]
+{memo_summary}
+
+JSON만 출력(마크다운 금지):
+{{"decision":"BUY/HOLD/WAIT/SELL","confidence":0-100,"strategy_type":"BREAKOUT/PULLBACK/MEAN_REVERSION/TREND_FOLLOWING","target_price":정수,"stop_loss":정수,"reasoning":"한줄요약"}}
+
+규칙: 목표가=현재가×1.05~1.3, 손절가=현재가×0.9~0.95. 비상식적이면 WAIT."""
+
+    def _build_executor_prompt(self, code: str, name: str, memo: str, facts: dict) -> str:
+        if self.compact_prompt and self.use_cli:
+            return self._build_compact_executor_prompt(code, name, memo, facts)
+
+        curr_price = facts.get("current_price", 0)
+        score = facts.get("score", 0)
+
         prompt = f"""당신은 최고 리스크 관리자(Chief Risk Officer)이자 최종 매매 집행기(Trade Executor)입니다.
 아래는 수석 애널리스트가 보낸 타겟 종목 [ {name} ({code}) ]에 대한 상세 분석 마크다운 리포트(Investment Committee Memo)입니다.
 
@@ -81,7 +103,7 @@ class ClaudeExecutor(IExecutorLLM):
         """Call Claude implementation (CLI or API)"""
         if self.use_cli:
             try:
-                return cli_call_claude(prompt, timeout=60)
+                return cli_call_claude(prompt, timeout=120, max_retries=1)
             except ClaudeCLIError as e:
                 self.logger.error(f"Claude CLI Error: {e}")
                 return self._fallback_json()

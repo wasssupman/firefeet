@@ -10,10 +10,11 @@ class ClaudeAnalyst(IAnalystLLM):
     Adapter for Anthropic Claude APIs.
     Responsible for generating high-level Markdown memos analyzing the data.
     """
-    def __init__(self, model_name="claude-sonnet-4-20250514", temperature=0.1):
+    def __init__(self, model_name="claude-sonnet-4-20250514", temperature=0.1, compact_prompt=False):
         self.logger = logging.getLogger("ClaudeAnalyst")
         self.model_name = model_name
         self.temperature = temperature
+        self.compact_prompt = compact_prompt
 
         # Load API key
         loader = ConfigLoader()
@@ -61,15 +62,52 @@ class ClaudeAnalyst(IAnalystLLM):
 
         # 2차: CLI fallback
         try:
-            return cli_call_claude(prompt, timeout=90)
+            return cli_call_claude(prompt, timeout=180, max_retries=1)
         except ClaudeCLIError as e:
             self.logger.error(f"Claude CLI Error: {e}. Falling back to mock.")
 
         # 3차: Mock fallback (최후 수단)
         return self._get_mock_response(name)
 
+    def _build_compact_prompt(self, code: str, name: str, data: dict) -> str:
+        """Builds a lightweight ~1KB prompt for CLI fallback to avoid timeouts."""
+        ohlc_str = ""
+        if data.get("ohlc") is not None:
+            df = data["ohlc"].tail(5)[["date", "close", "volume"]]
+            ohlc_str = df.to_csv(index=False)
+
+        supply = data.get("supply", {})
+        supply_str = ""
+        if hasattr(supply, 'tail'):
+            supply_str = supply.tail(5)[["date", "individual", "foreigner", "institution"]].to_csv(index=False)
+
+        news_str = "\n".join(f"- {n.get('title', '')}" for n in data.get("news", [])[:5])
+
+        temp = data.get("market_temp", {})
+        temp_str = f"{temp.get('temperature', 0)}({temp.get('level', 'N/A')})"
+
+        curr = data.get("current_data", {})
+
+        return f"""한국주식 스윙매매 애널리스트. {name}({code}) 분석 후 매매의견 제시.
+
+현재가:{curr.get('price', 'N/A')} 등락:{curr.get('change_rate', 0)}% 스코어:{data.get('screener_score', 'N/A')}/100 온도:{temp_str}
+
+[OHLCV 5일]
+{ohlc_str}
+[수급]
+{supply_str}
+[뉴스]
+{news_str}
+
+위 데이터 기반으로:
+1. 핵심 팩트 3개
+2. Bull/Bear 시나리오
+3. 매수/관망/매도 의견 + 목표가/손절가 레인지"""
+
     def _build_analyst_prompt(self, code: str, name: str, data: dict) -> str:
         """Builds a prompt tailored for Claude to produce a comprehensive markdown memo."""
+        if self.compact_prompt:
+            return self._build_compact_prompt(code, name, data)
 
         ohlc_str = ""
         if "ohlc" in data and data["ohlc"] is not None:

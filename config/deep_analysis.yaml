@@ -1,42 +1,33 @@
-# AI 딥 리서치 분석 설정
-
-# AI 모델
-model: "claude-sonnet-4-6"
+data_sources:
+  dart_api: true
+  macro_global: true
+  naver_consensus: true
+  naver_fundamental: true
+  news_naver: true
+  peer_comparison: true
+  supply_kis: true
+  technical_yfinance: true
 max_tokens_per_section: 2048
 max_tokens_synthesis: 4096
-temperature: 0.2
-synthesis_temperature: 0.3
-
-# 활성 섹션 (개별 ON/OFF)
-sections:
-  company_overview: true
-  financial_analysis: true
-  valuation: true
-  industry_competition: true
-  supply_technical: true
-  news_disclosure: true
-  consensus: true
-  investment_thesis: true
-
+model: claude-sonnet-4-6
 orchestrator:
   analyst_timeout_sec: 30.0
+  compact_prompt: true
   fallback_on_analyst_fail: true
-  max_daily_calls: 100      # Paper 테스트용 상향 (운영 시 15로 복원)
-
-# 데이터 소스 ON/OFF
-data_sources:
-  naver_fundamental: true
-  dart_api: true           # DART_API_KEY 필요
-  naver_consensus: true
-  technical_yfinance: true
-  peer_comparison: true
-  supply_kis: true          # 기존 SupplyAnalyzer
-  news_naver: true          # 기존 NewsScraper
-  macro_global: true        # 기존 MacroAnalyzer
-
-# 리포트 출력
+  max_daily_calls: 100
 output:
+  discord_full: false
+  discord_summary: true
+  file_dir: reports
   save_file: true
-  file_dir: "reports"
-  discord_summary: true     # Discord에는 요약만 전송
-  discord_full: false       # 전체 리포트 Discord 전송
+sections:
+  company_overview: true
+  consensus: true
+  financial_analysis: true
+  industry_competition: true
+  investment_thesis: true
+  news_disclosure: true
+  supply_technical: true
+  valuation: true
+synthesis_temperature: 0.3
+temperature: 0.2

@@ -204,9 +204,9 @@ class ScalpStrategy:
         if profit_rate >= tp:
             return True, f"SCALP_SELL_TP({profit_rate:+.2f}%)", False
 
-        # 3. 시간 초과 — 시장가
+        # 3. 시간 초과 — 지정가 (시장가 슬리피지 방지)
         if hold_seconds >= max_hold:
-            return True, f"SCALP_SELL_TIMEOUT({hold_seconds}s)", True
+            return True, f"SCALP_SELL_TIMEOUT({hold_seconds}s)", False
 
         # 4. 시그널 반전 — 조건부 청산 (히스테리시스 적용)
         #    a) 최소 90초 보유 (시그널 안정화 대기)

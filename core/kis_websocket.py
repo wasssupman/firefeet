@@ -74,7 +74,7 @@ class KISWebSocket:
         if self.ws:
             try:
                 self.ws.close()
-            except:
+            except Exception:
                 pass
         self._connected = False
         self._subscriptions.clear()

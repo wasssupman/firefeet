@@ -19,16 +19,21 @@ class RiskManager:
         # 일일 추적
         self.daily_pnl = 0           # 일일 실현손익
         self.daily_trade_count = 0   # 일일 거래 횟수
+        self.daily_buy_count = 0     # 매수 주문 횟수 (BUY 시점 카운트)
         self.consecutive_losses = 0  # 연속 손실 횟수
         self.last_trade_time = 0     # 마지막 거래 시각
 
         # 서킷브레이커
         self.circuit_broken = False
         self.circuit_break_time = 0
+        self.circuit_reset_count = 0  # 서킷브레이커 리셋 횟수
+
+        # 종목별 추적
+        self._per_stock_losses = {}   # {code: 손실 횟수}
+        self._per_stock_entries = {}  # {code: 진입 횟수}
 
         # 현재 온도
         self.temperature_level = "NEUTRAL"
-        self._temp_overrides = {}
 
     def _load_yaml(self, path):
         try:
@@ -62,16 +67,16 @@ class RiskManager:
         신규 진입 가능 여부 체크.
         Returns: (allowed: bool, reason: str)
         """
-        # 1. 서킷브레이커 체크
+        # 1. 서킷브레이커 체크 (해제 로직은 check_circuit_reset()에 위임)
         if self.circuit_broken:
-            cooldown = self.rules.get("daily_limits", {}).get("cooldown_after_circuit", 600)
-            elapsed = time.time() - self.circuit_break_time
-            if elapsed < cooldown:
-                remaining = int(cooldown - elapsed)
+            if not self.check_circuit_reset():
+                cooldown = self.rules.get("daily_limits", {}).get("cooldown_after_circuit", 600)
+                elapsed = time.time() - self.circuit_break_time
+                remaining = int(max(0, cooldown - elapsed))
+                max_resets = self.rules.get("daily_limits", {}).get("max_circuit_resets", 3)
+                if self.circuit_reset_count >= max_resets:
+                    return False, f"서킷브레이커 리셋 한도 초과 ({self.circuit_reset_count}/{max_resets})"
                 return False, f"서킷브레이커 쿨다운 ({remaining}초 남음)"
-            else:
-                self.circuit_broken = False
-                print("[RiskManager] 서킷브레이커 쿨다운 해제")
 
         # 2. 시간 제한 체크
         time_ok, time_reason = self._check_time_restrictions()
@@ -90,10 +95,11 @@ class RiskManager:
         if budget > 0 and (abs(self.daily_pnl) / budget * 100) >= max_daily_pct and self.daily_pnl < 0:
             return False, f"일일 손실률 한도 ({abs(self.daily_pnl)/budget*100:.1f}% / {max_daily_pct}%)"
 
-        # 4. 일일 거래 횟수 체크
+        # 4. 일일 거래 횟수 체크 (매수/매도 중 큰 값 사용)
         max_trades = daily.get("max_daily_trades", 50)
-        if self.daily_trade_count >= max_trades:
-            return False, f"일일 거래 횟수 한도 ({self.daily_trade_count}/{max_trades})"
+        effective_count = max(self.daily_trade_count, self.daily_buy_count)
+        if effective_count >= max_trades:
+            return False, f"일일 거래 횟수 한도 ({effective_count}/{max_trades})"
 
         # 5. 포지션 수 제한
         max_positions = self._get_max_positions()
@@ -139,7 +145,30 @@ class RiskManager:
 
     # ── Post-trade Updates ──────────────────────────
 
-    def record_trade(self, pnl):
+    def record_buy(self, code):
+        """매수 주문 시점 기록 — BUY-SELL 비동기 갭에서 한도 우회 방지"""
+        self.daily_buy_count += 1
+        self._per_stock_entries[code] = self._per_stock_entries.get(code, 0) + 1
+
+    def can_trade_stock(self, code):
+        """종목별 진입/손실 한도 체크.
+        Returns: (allowed: bool, reason: str)
+        """
+        daily = self.rules.get("daily_limits", {})
+        max_losses = daily.get("max_losses_per_stock", 5)
+        max_entries = daily.get("max_entries_per_stock", 10)
+
+        losses = self._per_stock_losses.get(code, 0)
+        if losses >= max_losses:
+            return False, f"종목 손실 한도 ({code}: {losses}/{max_losses})"
+
+        entries = self._per_stock_entries.get(code, 0)
+        if entries >= max_entries:
+            return False, f"종목 진입 한도 ({code}: {entries}/{max_entries})"
+
+        return True, ""
+
+    def record_trade(self, pnl, code=None):
         """거래 결과 기록"""
         self.daily_pnl += pnl
         self.daily_trade_count += 1
@@ -147,6 +176,8 @@ class RiskManager:
 
         if pnl < 0:
             self.consecutive_losses += 1
+            if code:
+                self._per_stock_losses[code] = self._per_stock_losses.get(code, 0) + 1
         else:
             self.consecutive_losses = 0
 
@@ -154,6 +185,23 @@ class RiskManager:
         max_consec = self.rules.get("daily_limits", {}).get("max_consecutive_losses", 5)
         if self.consecutive_losses >= max_consec:
             self._trigger_circuit_breaker(f"연속 {self.consecutive_losses}회 손실")
+
+    def check_circuit_reset(self) -> bool:
+        """쿨다운 만료 시 서킷브레이커 자동 해제. 해제되면 True 반환."""
+        if not self.circuit_broken:
+            return False
+        cooldown = self.rules.get("daily_limits", {}).get("cooldown_after_circuit", 600)
+        elapsed = time.time() - self.circuit_break_time
+        if elapsed >= cooldown:
+            max_resets = self.rules.get("daily_limits", {}).get("max_circuit_resets", 3)
+            if self.circuit_reset_count >= max_resets:
+                return False
+            self.circuit_reset_count += 1
+            self.circuit_broken = False
+            self.consecutive_losses = 0
+            print(f"[RiskManager] 서킷브레이커 쿨다운 해제 ({int(elapsed)}초 경과, 리셋 {self.circuit_reset_count}/{max_resets})")
+            return True
+        return False
 
     def _trigger_circuit_breaker(self, reason):
         """서킷브레이커 발동"""
@@ -196,9 +244,13 @@ class RiskManager:
         """일일 카운터 리셋"""
         self.daily_pnl = 0
         self.daily_trade_count = 0
+        self.daily_buy_count = 0
         self.consecutive_losses = 0
         self.circuit_broken = False
         self.circuit_break_time = 0
+        self.circuit_reset_count = 0
+        self._per_stock_losses = {}
+        self._per_stock_entries = {}
         print("[RiskManager] 일일 리스크 카운터 리셋")
 
     def get_daily_summary(self):

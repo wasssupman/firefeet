@@ -1,4 +1,5 @@
 import requests
+from collections import OrderedDict
 from bs4 import BeautifulSoup
 import time
 import datetime
@@ -7,7 +8,7 @@ class NewsScraper:
     def __init__(self):
         # Naver Finance Real-time News (Main News)
         self.url = "https://finance.naver.com/news/news_list.naver?mode=LSS2D&section_id=101&section_id2=258"
-        self.seen_links = set()
+        self._seen_links = OrderedDict()  # 순서 보장 중복 제거 (FIFO 퇴출)
 
     def fetch_news(self):
         """
@@ -32,15 +33,13 @@ class NewsScraper:
                 href = a_tag.get('href', '')
                 link = href if href.startswith('http') else "https://finance.naver.com" + href
                 
-                # Deduplication
-                if link in self.seen_links:
+                # Deduplication (OrderedDict로 FIFO 퇴출)
+                if link in self._seen_links:
                     continue
-                
-                self.seen_links.add(link)
-                
-                # Keep set size manageable
-                if len(self.seen_links) > 1000:
-                    self.seen_links.pop()
+
+                self._seen_links[link] = True
+                while len(self._seen_links) > 1000:
+                    self._seen_links.popitem(last=False)  # 가장 오래된 항목 제거
                     
                 news_items.append({
                     'title': title,

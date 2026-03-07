@@ -3,6 +3,8 @@ import json
 import time
 import os
 
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 class KISAuth:
     def __init__(self, config):
         self.app_key = config["APP_KEY"]
@@ -10,12 +12,13 @@ class KISAuth:
         self.url_base = config["URL_BASE"]
         self.token = None
         self.token_expired = None
+        self._cache_path = os.path.join(_PROJECT_ROOT, ".token_cache.json")
 
     def get_access_token(self):
         """
         Issues an OAuth access token or reuse from cache.
         """
-        cache_path = ".token_cache.json"
+        cache_path = self._cache_path
         
         # 1. Try Cache
         if os.path.exists(cache_path):
@@ -29,7 +32,7 @@ class KISAuth:
                     self.token_expired = cache["token_expired_at"]
                     # print(f"[KISAuth] Using cached token. Expires: {self.token_expired}")
                     return self.token
-            except:
+            except (json.JSONDecodeError, KeyError, ValueError):
                 pass
 
         # 2. Issue New Token
@@ -77,7 +80,7 @@ class KISAuth:
     def invalidate_token(self):
         """토큰 캐시 무효화 — 다음 요청 시 신규 발급"""
         self.token = None
-        cache_path = ".token_cache.json"
+        cache_path = self._cache_path
         if os.path.exists(cache_path):
             os.remove(cache_path)
         print("[KISAuth] 토큰 캐시 무효화 — 재발급 예정")

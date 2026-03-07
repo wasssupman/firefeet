@@ -40,6 +40,14 @@ class SentimentModule(TempModule):
                 today = datetime.date.today().isoformat()
                 daily_scores[today] = daily_scores.get(today, 0) + global_result["score"]
 
+            # 모든 소스에서 기사 0건이면 에러 전파
+            total_articles = sum(
+                s.get("total_bull", 0) + s.get("total_bear", 0)
+                for s in source_details.values()
+            )
+            if active_sources > 0 and total_articles == 0:
+                return {"score": 0, "details": {}, "error": "뉴스 데이터 수집 실패 (0건)"}
+
             # 소스가 여러 개면 평균
             if active_sources > 1:
                 daily_scores = {d: v / active_sources for d, v in daily_scores.items()}

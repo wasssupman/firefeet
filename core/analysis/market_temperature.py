@@ -53,8 +53,98 @@ class MarketTemperature:
                 return level
         return "COLD"
 
-    def calculate(self):
-        """온도 산출. 모든 활성 모듈을 실행하고 가중 합산."""
+    def _compute_regime(self, components, details, liquidity_data=None):
+        """
+        기존 모듈 결과(components, details)를 재활용해 regime 벡터 산출.
+        liquidity_data: optional dict with "spread_bps" or "volume_ratio".
+        예외 발생 시 모두 중립값 반환.
+        """
+        _DEFAULT = {
+            "trend": "SIDEWAYS",
+            "volatility": "STABLE",
+            "liquidity": "NORMAL",
+            "event_risk": "LOW",
+        }
+        try:
+            # --- trend: macro us_index avg_change 기반 ---
+            trend = "SIDEWAYS"
+            macro_details = details.get("macro", {})
+            us_index = macro_details.get("us_index", {})
+            trend_info = us_index.get("trend_info", {})
+            avg_change = trend_info.get("avg_change")
+            if avg_change is not None:
+                if avg_change > 0.5:
+                    trend = "UPTREND"
+                elif avg_change < -0.5:
+                    trend = "DOWNTREND"
+                else:
+                    trend = "SIDEWAYS"
+
+            # --- volatility: macro vix current_price 기반 ---
+            volatility = "STABLE"
+            vix_details = macro_details.get("vix", {})
+            vix_individual = vix_details.get("individual", {})
+            vix_data = vix_individual.get("VIX", {})
+            vix_price = vix_data.get("current_price")
+            if vix_price is not None:
+                if vix_price > 25:
+                    volatility = "EXPANDING"
+                elif vix_price < 15:
+                    volatility = "CONTRACTING"
+                else:
+                    volatility = "STABLE"
+
+            # --- liquidity: 외부 주입 데이터 기반 ---
+            liquidity = "NORMAL"
+            if liquidity_data:
+                spread_bps = liquidity_data.get("spread_bps")
+                volume_ratio = liquidity_data.get("volume_ratio")
+                if spread_bps is not None:
+                    if spread_bps <= 5:
+                        liquidity = "HIGH"
+                    elif spread_bps <= 15:
+                        liquidity = "NORMAL"
+                    elif spread_bps <= 30:
+                        liquidity = "LOW"
+                    else:
+                        liquidity = "DRY"
+                elif volume_ratio is not None:
+                    if volume_ratio >= 3.0:
+                        liquidity = "HIGH"
+                    elif volume_ratio >= 1.5:
+                        liquidity = "NORMAL"
+                    elif volume_ratio >= 0.5:
+                        liquidity = "LOW"
+                    else:
+                        liquidity = "DRY"
+
+            # --- event_risk: econ uncertainty pending_events 기반 ---
+            event_risk = "LOW"
+            econ_details = details.get("econ", {})
+            uncertainty = econ_details.get("uncertainty", {})
+            pending = uncertainty.get("pending_events", 0)
+            if pending >= 2:
+                event_risk = "HIGH"
+            elif pending == 1:
+                event_risk = "MEDIUM"
+            else:
+                event_risk = "LOW"
+
+            return {
+                "trend": trend,
+                "volatility": volatility,
+                "liquidity": liquidity,
+                "event_risk": event_risk,
+            }
+        except Exception:
+            return dict(_DEFAULT)
+
+    def calculate(self, liquidity_data=None):
+        """온도 산출. 모든 활성 모듈을 실행하고 가중 합산.
+
+        Args:
+            liquidity_data: optional dict with "spread_bps" (float) or "volume_ratio" (float).
+        """
         results = {}
         failed = []
 
@@ -72,7 +162,7 @@ class MarketTemperature:
 
         # 실패 모듈 과반수 경고
         total_modules = len(self.modules)
-        if total_modules > 0 and len(failed) >= total_modules / 2:
+        if total_modules > 0 and len(failed) > total_modules / 2:
             warning_msg = (
                 f"[MarketTemperature] 온도 모듈 과반수 실패! "
                 f"({len(failed)}/{total_modules}): {', '.join(failed)}"
@@ -96,6 +186,7 @@ class MarketTemperature:
                 "components": {},
                 "details": {},
                 "failed": failed,
+                "regime": self._compute_regime({}, {}, liquidity_data),
             }
 
         temperature = 0
@@ -125,9 +216,15 @@ class MarketTemperature:
 
         components = {name: r["score"] for name, r in results.items()}
         details = {name: r.get("details", {}) for name, r in results.items()}
-        
+
         if ai_override_info:
             details["ai_macro"] = ai_override_info
+
+        # 부분 실패 감지: 성공 모듈이 있지만 전부 score=0이고 details도 비어있으면 degraded
+        degraded = (
+            len(results) > 0 and
+            all(r["score"] == 0 and not r.get("details") for r in results.values())
+        )
 
         return {
             "temperature": temperature,
@@ -135,6 +232,8 @@ class MarketTemperature:
             "components": components,
             "details": details,
             "failed": failed,
+            "degraded": degraded,
+            "regime": self._compute_regime(components, details, liquidity_data),
         }
 
     def generate_report(self, result=None):
@@ -197,6 +296,8 @@ class MarketTemperature:
                 lines.append(f"  오늘 미발표 고중요도: {pending}건")
 
         # 실패 모듈
+        if result.get("degraded"):
+            lines.append(f"\n🟡 데이터 불완전: 모든 모듈이 score=0 (데이터 소스 응답 없을 수 있음)")
         if result["failed"]:
             lines.append(f"\n⚠️ 실패 모듈: {', '.join(result['failed'])}")
 

@@ -126,30 +126,40 @@ strategy_profiles:
     stop_loss: -3.0
     max_position_pct: 0.35
     min_screen_score: 20
+    atr_sl_multiplier: 2.0    # 공격적: 좁은 SL (추세 신뢰)
+    atr_tp_multiplier: 3.5    # 넓은 TP (수익 극대화)
   WARM:
     k: 0.4
     take_profit: 3.5
     stop_loss: -3.0
     max_position_pct: 0.30
     min_screen_score: 30
+    atr_sl_multiplier: 2.0
+    atr_tp_multiplier: 3.0
   NEUTRAL:
     k: 0.5
     take_profit: 3.0
     stop_loss: -3.0
     max_position_pct: 0.25
     min_screen_score: 30
+    atr_sl_multiplier: 2.5
+    atr_tp_multiplier: 3.0
   COOL:
     k: 0.6
     take_profit: 2.5
     stop_loss: -2.5
     max_position_pct: 0.20
     min_screen_score: 45
+    atr_sl_multiplier: 2.5
+    atr_tp_multiplier: 2.5
   COLD:
     k: 0.7
     take_profit: 2.0
     stop_loss: -2.0
     max_position_pct: 0.15
     min_screen_score: 60
+    atr_sl_multiplier: 3.0    # 방어적: 넓은 SL (노이즈 회피)
+    atr_tp_multiplier: 2.0    # 좁은 TP (빠른 수익 확정)
 
 # ── 온도 레벨 경계값 ──
 level_thresholds:

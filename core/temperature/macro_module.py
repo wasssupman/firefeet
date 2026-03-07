@@ -53,6 +53,12 @@ class MacroModule(TempModule):
                 }
                 total += clamped
 
+            enabled_count = sum(
+                1 for sub_name in self.SUB_MODULE_SYMBOLS
+                if sub_configs.get(sub_name, {}).get("enabled", sub_name != "bond")
+            )
+            if enabled_count > 0 and len(details) == 0:
+                return {"score": 0, "details": {}, "error": "모든 매크로 데이터 소스 응답 없음"}
             return {"score": clamp(total, -100, 100), "details": details, "error": None}
 
         except Exception as e:

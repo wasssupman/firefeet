@@ -8,8 +8,6 @@ import pandas as pd
 class OrderType(enum.Enum):
     BUY = "2"
     SELL = "1"
-    BUY_MARKET = "2"
-    SELL_MARKET = "1"
 
 class KISManager:
     def __init__(self, auth, account_info, mode="PAPER"):
@@ -34,7 +32,7 @@ class KISManager:
                 print(f"[KISManager] 속도 제한 — 1초 대기 후 재시도")
                 _time.sleep(1)
                 res = requests.request(method, url, headers=headers, **kwargs)
-            elif "EGW00123" in body or res.status_code == 401:
+            elif "EGW00123" in body:
                 # 토큰 만료 — 갱신 후 재시도
                 print(f"[KISManager] 토큰 만료 — 갱신 후 재시도")
                 self.auth.invalidate_token()
@@ -142,7 +140,7 @@ class KISManager:
             try:
                 if val is None or val == '': return 0
                 return int(val)
-            except:
+            except (ValueError, TypeError):
                 return 0
 
         try:
@@ -209,6 +207,7 @@ class KISManager:
                         "qty": int(item['hldg_qty']),
                         "orderable_qty": int(item.get('ord_psbl_qty', item['hldg_qty'])),
                         "buy_price": float(item.get('pchs_avg_pric', 0)),
+                        "current_price": int(item.get('prpr', 0)),
                         "profit_rate": float(item['evlu_pfls_rt'])
                     })
 

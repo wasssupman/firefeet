@@ -12,7 +12,10 @@ mode:
       max_daily_loss_pct: 6.0         # 일일 최대 손실률 (%)
       max_consecutive_losses: 5       # 서킷브레이커 연속 손실 횟수
       cooldown_after_circuit: 600     # 쿨다운 (초)
+      max_circuit_resets: 1           # 서킷브레이커 최대 리셋 횟수
       max_daily_trades: 50            # 일일 거래 한도
+      max_losses_per_stock: 2         # 종목별 최대 손실 횟수
+      max_entries_per_stock: 3        # 종목별 최대 진입 횟수
     time_restrictions:
       no_entry_before: "0905"         # 장 초반 5분 변동성 회피
       no_entry_after: "1510"          # 마감 20분전 진입 차단
@@ -20,15 +23,18 @@ mode:
 
   paper:
     per_trade:
-      max_loss_amount: 20000          # 건당 2만원
-      max_loss_pct: 1.0               # 건당 최대 손실률 (%)
+      max_loss_amount: 10000          # 건당 1만원 (기존 2만 → 1만, RISK 손실 축소)
+      max_loss_pct: 0.7               # 건당 최대 손실률 (기존 1.0% → 0.7%, SL과 근접)
       max_position_value: 2000000     # 건당 최대 포지션 (KRW)
     daily_limits:
       max_daily_loss: 200000          # 일일 20만원
       max_daily_loss_pct: 5.0         # 일일 최대 손실률 (%)
       max_consecutive_losses: 5       # 서킷브레이커 연속 손실 횟수
       cooldown_after_circuit: 300     # 쿨다운 (초)
-      max_daily_trades: 100           # 일일 거래 한도
+      max_circuit_resets: 1           # 서킷브레이커 최대 리셋 횟수 (무한 순환 방지)
+      max_daily_trades: 20            # 일일 거래 한도
+      max_losses_per_stock: 2         # 종목별 최대 손실 횟수
+      max_entries_per_stock: 3        # 종목별 최대 진입 횟수
     time_restrictions:
       no_entry_before: "0900"         # 장 시작부터 진입 가능
       no_entry_after: "1525"          # 15:25까지 진입 가능

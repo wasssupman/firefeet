@@ -2,6 +2,7 @@ import os
 import json
 import datetime
 import logging
+import fcntl
 from core.interfaces.llm import IAnalystLLM, IExecutorLLM
 from core.analysis.llms.claude_analyst import ClaudeAnalyst
 from core.analysis.llms.claude_executor import ClaudeExecutor
@@ -33,8 +34,9 @@ class AISwingAgent:
         self.usage_file = "logs/ai_usage.json"
         
         # Dependency Injection (Defaults to Claude -> Claude -> Vision)
-        self.analyst = analyst if analyst else ClaudeAnalyst()
-        self.executor = executor if executor else ClaudeExecutor()
+        compact = orch_config.get("compact_prompt", False)
+        self.analyst = analyst if analyst else ClaudeAnalyst(compact_prompt=compact)
+        self.executor = executor if executor else ClaudeExecutor(compact_prompt=compact)
         self.vision = VisionAnalyst()
         
     def analyze_trading_opportunity(self, code: str, name: str, data: dict) -> dict:
@@ -79,7 +81,15 @@ class AISwingAgent:
         try:
              self.logger.info(f"[{name}({code})] Phase 2: Executor parsing Memo into Trading Order...")
              decision_json = self.executor.execute_decision(code, name, memo, hard_facts)
-             
+
+             # Decision summary log
+             self.logger.info(
+                 f"[{name}({code})] Phase 2 결과: {decision_json.get('decision', 'N/A')} "
+                 f"(확신도: {decision_json.get('confidence', 0)}, "
+                 f"전략: {decision_json.get('strategy_type', 'N/A')}) — "
+                 f"{str(decision_json.get('reasoning', ''))[:100]}"
+             )
+
              # Python-level sanity check
              decision_json = self._sanity_check(decision_json, hard_facts, code, name)
              
@@ -128,8 +138,13 @@ class AISwingAgent:
         stop = float(decision.get("stop_loss", 0))
         
         if action == "BUY":
+            # LLM이 target_price 또는 stop_loss를 미제공한 경우 (0값) → 매수 불가
+            if target <= 0 or stop <= 0:
+                self.logger.warning(f"[{name}({code})] LLM sanity check failed: missing target/stop. Target: {target}, Stop: {stop}. Overriding to WAIT.")
+                decision["decision"] = "WAIT"
+                decision["reasoning"] = f"OVERRIDDEN: Missing target_price or stop_loss from LLM. (Target: {target}, Stop: {stop})"
             # Sanity logic: target must be > price, stop must be < price
-            if target <= price or stop >= price:
+            elif target <= price or stop >= price:
                 self.logger.warning(f"[{name}({code})] LLM sanity check failed. Price: {price}, Target: {target}, Stop: {stop}. Overriding to WAIT.")
                 decision["decision"] = "WAIT"
                 decision["reasoning"] = f"OVERRIDDEN: LLM suggested invalid logic. (Price: {price}, Target: {target}, Stop: {stop})"
@@ -148,40 +163,46 @@ class AISwingAgent:
         }
         
     def _check_and_increment_quota(self) -> bool:
-        """Check if daily max runs is exceeded. Creates tracking file if not exists."""
+        """Check if daily max runs is exceeded. Uses file locking for multi-process safety."""
         if self.max_daily_calls <= 0:
-            return True # Unlimited if set to 0
-            
+            return True  # Unlimited if set to 0
+
         today_str = datetime.datetime.now().strftime("%Y-%m-%d")
-        usage_data = {"date": today_str, "count": 0}
-        
+
         # Ensure log dir exists
         os.makedirs(os.path.dirname(self.usage_file) or ".", exist_ok=True)
-            
-        try:
-            if os.path.exists(self.usage_file):
-                with open(self.usage_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    if data.get("date") == today_str:
-                        usage_data["count"] = data.get("count", 0)
-        except Exception as e:
-            self.logger.warning(f"Error reading usage logic: {e}")
-            
-        if usage_data["count"] >= self.max_daily_calls:
-            self.logger.warning(f"일일 AI 호출 쿼터 초과: {usage_data['count']}/{self.max_daily_calls}")
-            return False
-
-        usage_data["count"] += 1
-
-        # 80% 경고
-        threshold_80 = int(self.max_daily_calls * 0.8)
-        if usage_data["count"] == threshold_80:
-            self.logger.warning(f"AI 호출 쿼터 80% 도달: {usage_data['count']}/{self.max_daily_calls}")
 
         try:
-            with open(self.usage_file, "w", encoding="utf-8") as f:
-                json.dump(usage_data, f)
-        except Exception as e:
-            self.logger.warning(f"쿼터 파일 쓰기 실패: {e}")
+            # 파일 락으로 동시 접근 방지 (read-modify-write 원자적 실행)
+            with open(self.usage_file, "a+", encoding="utf-8") as f:
+                fcntl.flock(f, fcntl.LOCK_EX)
+                try:
+                    f.seek(0)
+                    content = f.read().strip()
+                    if content:
+                        usage_data = json.loads(content)
+                        if usage_data.get("date") != today_str:
+                            usage_data = {"date": today_str, "count": 0}
+                    else:
+                        usage_data = {"date": today_str, "count": 0}
 
-        return True
+                    if usage_data["count"] >= self.max_daily_calls:
+                        self.logger.warning(f"일일 AI 호출 쿼터 초과: {usage_data['count']}/{self.max_daily_calls}")
+                        return False
+
+                    usage_data["count"] += 1
+
+                    # 80% 경고
+                    threshold_80 = int(self.max_daily_calls * 0.8)
+                    if usage_data["count"] == threshold_80:
+                        self.logger.warning(f"AI 호출 쿼터 80% 도달: {usage_data['count']}/{self.max_daily_calls}")
+
+                    f.seek(0)
+                    f.truncate()
+                    json.dump(usage_data, f)
+                    return True
+                finally:
+                    fcntl.flock(f, fcntl.LOCK_UN)
+        except Exception as e:
+            self.logger.warning(f"쿼터 파일 처리 실패 (안전하게 허용): {e}")
+            return True

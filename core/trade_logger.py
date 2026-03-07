@@ -15,6 +15,11 @@ class TradeLogger:
         "timestamp", "date", "code", "name", "action", "signal",
         "qty", "price", "amount", "fee", "net_amount",
         "buy_price", "realized_pnl", "pnl_rate",
+        # simulation fields
+        "strategy", "composite", "threshold", "temperature",
+        "sig_vwap", "sig_ob", "sig_mom", "sig_vol", "sig_trend",
+        "spread_bps", "penalty", "tp_pct", "sl_pct", "vwap_dist",
+        "hold_seconds", "peak_profit_pct",
     ]
 
     def __init__(self, log_dir="logs", strategy="main"):
@@ -114,7 +119,7 @@ class TradeLogger:
 
     # ── Scalping Logging ─────────────────────────────────
 
-    def log_scalp_buy(self, code, name, qty, price, signal_confidence=0):
+    def log_scalp_buy(self, code, name, qty, price, signal_confidence=0, **kwargs):
         """스캘핑 매수 기록"""
         now = datetime.datetime.now()
         amount = qty * price
@@ -136,13 +141,29 @@ class TradeLogger:
             "buy_price": "",
             "realized_pnl": "",
             "pnl_rate": "",
+            "strategy": kwargs.get("strategy", ""),
+            "composite": kwargs.get("composite", ""),
+            "threshold": kwargs.get("threshold", ""),
+            "temperature": kwargs.get("temperature", ""),
+            "sig_vwap": kwargs.get("sig_vwap", ""),
+            "sig_ob": kwargs.get("sig_ob", ""),
+            "sig_mom": kwargs.get("sig_mom", ""),
+            "sig_vol": kwargs.get("sig_vol", ""),
+            "sig_trend": kwargs.get("sig_trend", ""),
+            "spread_bps": kwargs.get("spread_bps", ""),
+            "penalty": kwargs.get("penalty", ""),
+            "tp_pct": kwargs.get("tp_pct", ""),
+            "sl_pct": kwargs.get("sl_pct", ""),
+            "vwap_dist": kwargs.get("vwap_dist", ""),
+            "hold_seconds": "",
+            "peak_profit_pct": "",
         }
         self._write_row(row)
         print(f"  [Scalp] BUY {name}({code}) {qty}주 @ {price:,}원 | "
               f"총비용: {net_amount:,}원 (conf={signal_confidence:.2f})")
         return {"fee": fee, "net_amount": net_amount}
 
-    def log_scalp_sell(self, code, name, qty, price, buy_price, signal="SCALP_SELL"):
+    def log_scalp_sell(self, code, name, qty, price, buy_price, signal="SCALP_SELL", **kwargs):
         """스캘핑 매도 기록"""
         now = datetime.datetime.now()
 
@@ -172,6 +193,22 @@ class TradeLogger:
             "buy_price": buy_price,
             "realized_pnl": realized_pnl,
             "pnl_rate": round(pnl_rate, 2),
+            "strategy": kwargs.get("strategy", ""),
+            "composite": kwargs.get("composite", ""),
+            "threshold": kwargs.get("threshold", ""),
+            "temperature": kwargs.get("temperature", ""),
+            "sig_vwap": kwargs.get("sig_vwap", ""),
+            "sig_ob": kwargs.get("sig_ob", ""),
+            "sig_mom": kwargs.get("sig_mom", ""),
+            "sig_vol": kwargs.get("sig_vol", ""),
+            "sig_trend": kwargs.get("sig_trend", ""),
+            "spread_bps": kwargs.get("spread_bps", ""),
+            "penalty": kwargs.get("penalty", ""),
+            "tp_pct": kwargs.get("tp_pct", ""),
+            "sl_pct": kwargs.get("sl_pct", ""),
+            "vwap_dist": kwargs.get("vwap_dist", ""),
+            "hold_seconds": kwargs.get("hold_seconds", ""),
+            "peak_profit_pct": kwargs.get("peak_profit_pct", ""),
         }
         self._write_row(row)
         print(f"  [Scalp] SELL({signal}) {name}({code}) {qty}주 @ {price:,}원 | "
