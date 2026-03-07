@@ -1,5 +1,5 @@
 config/secrets.yaml
-config/test.yaml
+.token_cache.json
 logs/
 db/
 .cache/

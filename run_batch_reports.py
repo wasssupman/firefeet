@@ -77,11 +77,11 @@ def get_top_stocks(limit=20, use_ai=True):
         volume_top = manager.get_top_volume_stocks(limit=50) # 50 returns 50 kospi + 50 kosdaq
     except Exception as e:
         print(f"[오류] 거래량 순위 조회 실패: {e}")
-        return []
+        return [], "거래량 순위 조회 실패"
 
     if not volume_top:
         print("[오류] 거래량 상위 종목 응답이 비어있습니다.")
-        return []
+        return [], "거래량 상위 종목 응답이 비어있음"
         
     print(f"2. {len(volume_top)}개 종목 대상 수급 및 기술적 스코어링 진행 중...")
     screener = StockScreener(strategy="deep_batch")
@@ -160,7 +160,7 @@ def get_top_stocks(limit=20, use_ai=True):
     
     if not filtered_stocks:
         print("조건을 만족하는 종목이 없어 스크리닝을 종료합니다.")
-        return []
+        return [], "조건을 만족하는 종목 없음"
 
     if not use_ai:
         print(f"\n3. AI 필터링 생략 (--no-ai). 기술적/수급 스코어 기반 상위 {limit}개 추출...")

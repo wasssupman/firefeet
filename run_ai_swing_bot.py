@@ -5,7 +5,7 @@ import time
 import datetime
 import threading
 import logging
-import tempfile
+import traceback
 from datetime import timezone, timedelta
 
 from core.encoding_setup import setup_utf8_stdout
@@ -32,35 +32,17 @@ logging.getLogger().addHandler(_error_handler)
 logging.getLogger("ClaudeAnalyst").setLevel(logging.WARNING)
 
 # ── 중복 실행 방지 (PID 파일 락) ──────────────────────────
-_PID_FILE = os.path.join(tempfile.gettempdir(), "firefeet_ai_swing.pid")
+from core.bot_lifecycle import BotLifecycle
 
-def _acquire_lock():
-    """이미 실행 중인 프로세스가 있으면 종료."""
-    if os.path.exists(_PID_FILE):
-        with open(_PID_FILE, "r") as f:
-            old_pid = f.read().strip()
-        if old_pid:
-            # 해당 PID가 실제 돌고 있는지 확인
-            try:
-                os.kill(int(old_pid), 0)  # signal 0 = 존재 확인만
-                print(f"[Error] AI 스윙 봇(PID: {old_pid})이 이미 실행 중입니다.")
-                sys.exit(1)
-            except (ProcessLookupError, ValueError, OSError):
-                pass  # 프로세스 없음 또는 Windows os.kill 미지원 → 락 해제 후 계속
-    
-    with open(_PID_FILE, "w") as f:
-        f.write(str(os.getpid()))
-
-def _release_lock():
-    """종료 시 PID 파일 제거."""
-    if os.path.exists(_PID_FILE):
-        os.remove(_PID_FILE)
-
-_acquire_lock()
+_lifecycle = BotLifecycle("firefeet_ai_swing", close_time="1520")
+_lifecycle.setup_signal_handler()
+_lifecycle.acquire_lock()
+_release_lock = _lifecycle.release_lock
 
 from core.config_loader import ConfigLoader
 from core.kis_auth import KISAuth
 from core.providers.kis_api import KISManager
+from core.providers.data_service import KISDataService
 from core.discord_client import DiscordClient
 from core.execution.scanner import StockScanner
 from core.analysis.scoring_engine import StockScreener
@@ -75,9 +57,8 @@ def is_market_hours():
     now = datetime.datetime.now(KST)
     if now.weekday() >= 5:
         return False
-    market_start = now.replace(hour=9, minute=0, second=0, microsecond=0)
-    market_end = now.replace(hour=15, minute=20, second=0, microsecond=0)
-    return market_start <= now <= market_end
+    now_str = f"{now.hour:02d}{now.minute:02d}"
+    return _lifecycle.is_market_hours(now_str)
 
 def _startup_health_check():
     """봇 시작 전 필수 의존성 점검"""
@@ -129,8 +110,9 @@ def _startup_health_check():
         secrets = loader.load_config()
         if not secrets.get("DISCORD_WEBHOOK_URL"):
             warnings.append("Discord Webhook URL 미설정 — 알림이 비활성화됩니다")
-        if not secrets.get("ANTHROPIC_API_KEY") and not secrets.get("ANTHROPIC_API_KEY", ""):
-            warnings.append("ANTHROPIC_API_KEY 미설정 — Claude CLI fallback 모드로 동작")
+        api_key = secrets.get("ANTHROPIC_API_KEY", "") or os.environ.get("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            warnings.append("ANTHROPIC_API_KEY 미설정 (secrets.yaml + 환경변수 모두 없음) — Claude CLI fallback 모드로 동작. API 직접 호출보다 느립니다.")
     except Exception as e:
         warnings.append(f"설정 파일 점검 중 오류: {e}")
 
@@ -176,6 +158,7 @@ def main():
     # 1. Data Provider
     auth = KISAuth(kis_config)
     manager = KISManager(auth, account_info, mode="REAL" if not is_paper else "PAPER")
+    data_service = KISDataService(manager)
     
     # 2. Helper Modules
     discord = DiscordClient() if not is_paper else None
@@ -187,11 +170,12 @@ def main():
     
     # 3. AI Agent & Screener
     ai_agent = AISwingAgent()
-    scanner = StockScanner(primary_fetcher=manager.get_top_volume_stocks)
+    scanner = StockScanner(primary_fetcher=data_service.get_top_volume_stocks)
     screener = StockScreener(strategy=strategy, discord=discord)
     
     # 4. Strategy & Trader
     trader = SwingTrader(manager, ai_agent, strategy=None, discord_client=discord)
+    trader.position_registry.cleanup_stale()
 
     # 5. DART 실시간 공시 감지 (백그라운드 데몬 스레드)
     try:
@@ -232,14 +216,11 @@ def main():
     # ── 데이터 콜백 함수 (Data Adapters) ──
     
     def screener_data_provider(code):
-        """Screener용 데이터 제공기"""
+        """Screener용 데이터 제공기 (KISDataService TTL 캐시 경유)"""
         try:
-            ohlc = manager.get_daily_ohlc(code)
-            time.sleep(0.3)
-            investor_trend = manager.get_investor_trend(code)
-            time.sleep(0.3)
-            current_data = manager.get_current_price(code)
-            time.sleep(0.3)
+            ohlc = data_service.get_daily_ohlc(code)
+            investor_trend = data_service.get_investor_trend(code)
+            current_data = data_service.get_current_price(code)
             return ohlc, investor_trend, current_data
         except Exception as e:
             print(f"[{code}] Data Fetch Error: {e}")
@@ -250,7 +231,22 @@ def main():
         try:
             ohlc, investor_trend, current_data = screener_data_provider(code)
             news = news_scraper.fetch_news()[:5] # 임시 키워드 매칭 제거
-            temp = market_temp.calculate()
+            now_ts = time.time()
+            if cached_temp["result"] is None or (now_ts - cached_temp["timestamp"] > TEMP_REFRESH_INTERVAL):
+                # Liquidity hint from scanner volume data
+                _liq_hint = None
+                if raw_stocks:
+                    _vols = [s.get("volume", 0) for s in raw_stocks[:10]]
+                    _avg_vol = sum(_vols) / len(_vols) if _vols else 0
+                    if _avg_vol > 0:
+                        _liq_hint = {"volume_ratio": _avg_vol / 1_000_000}
+                cached_temp["result"] = market_temp.calculate(liquidity_data=_liq_hint)
+                cached_temp["timestamp"] = now_ts
+                if cached_temp["result"].get("degraded"):
+                    print("⚠️ 시장 온도 데이터 불완전 (일부 소스 무응답)")
+                profiles = market_temp.config.get("strategy_profiles", {})
+                strategy.apply_temperature(cached_temp["result"], profiles)
+            temp = cached_temp["result"]
             
             return {
                 "ohlc": ohlc,
@@ -258,13 +254,16 @@ def main():
                 "current_data": current_data,
                 "market_temp": temp,
                 "news": news,
-                "screener_score": 0 # (실제 구현 시 Screener 결과를 캐싱하여 주입 고려)
+                "screener_score": screener_score_cache.get(code, 0)
             }
         except Exception as e:
             print(f"[{code}] AI Data Fetch Error: {e}")
             return {}
             
     # ── 메인 루프 ──
+    cached_temp = {"result": None, "timestamp": 0}
+    TEMP_REFRESH_INTERVAL = 3600  # 1시간마다 갱신
+    screener_score_cache = {}  # {code: total_score} — screen() 직후 갱신
     last_scan_time = 0
     scan_interval = trader.get_scan_interval() * 60
     last_portfolio_sync = 0
@@ -279,6 +278,8 @@ def main():
             # 장 운영시간 체크
             if not is_paper and not is_market_hours():
                 print(f"[{now.strftime('%H:%M:%S')}] 장 운영시간 아님. 1분 대기...")
+                cached_temp = {"result": None, "timestamp": 0}  # 다음 장 시작 시 재계산
+                trader.reset_daily()   # 날짜 변경 시에만 리셋 (장중 재시작 안전)
                 time.sleep(60)
                 continue
                 
@@ -286,6 +287,9 @@ def main():
             if now_ts - last_portfolio_sync > 600:
                 print("🔄 포트폴리오 동기화 중...")
                 trader.sync_portfolio()
+                # Registry sync: DB에 현재 포트폴리오 반영
+                for c, p in trader.portfolio.items():
+                    trader.position_registry.register(c, "swing", p["qty"], p["buy_price"])
                 last_portfolio_sync = now_ts
                 
             # 스크리닝 사이클
@@ -295,16 +299,22 @@ def main():
                 raw_stocks = scanner.get_top_volume_stocks(limit=15)
                 # 2. 스크리너 (스코어링) -> Discord 보고됨
                 screened_stocks = screener.screen(raw_stocks, screener_data_provider)
-                
+                # 3. screener_score 캐싱: ai_data_provider에서 실제 점수 주입
+                screener_score_cache = {r['code']: r['total_score'] for r in screened_stocks}
+
                 if screened_stocks:
                     # 상위 점수 종목만 타겟팅 (포트폴리오 미보유분 중심)
                     trader.update_target_codes(screened_stocks[:5])
                     print(f"🎯 신규 타겟 {len(screened_stocks[:5])}종목 등록 완료.")
-                    
+
                 last_scan_time = now_ts
                 
             # 매매 사이클 (보유 종목 + 신규 타겟 종목)
-            # AI 통신 대기가 길 수 있으므로 로그를 확실히 남김
+            # 쿨다운 현황 로그 (차단 종목 수 표시)
+            if trader.sold_today:
+                blocked = [f"{trader.stock_names.get(c, c)}" for c in trader.sold_today]
+                print(f"🔒 쿨다운 활성: {len(blocked)}종목 ({', '.join(blocked[:5])}{'...' if len(blocked) > 5 else ''})")
+
             for code in trader.target_codes:
                 name = trader.stock_names.get(code, '')
                 try:
@@ -323,8 +333,16 @@ def main():
     except KeyboardInterrupt:
         print("\n중지 요청받음. 봇 종료.")
     except Exception as e:
-        print(f"\n치명적 오류 발생: {e}")
+        error_msg = f"치명적 오류 발생:\n{traceback.format_exc()}"
+        print(f"\n{error_msg}")
+        logging.getLogger("AISwingBot").critical(error_msg)
+        if discord:
+            try:
+                discord.send(f"❌ **AI 스윙봇 크래시**\n```{traceback.format_exc()[:1500]}```")
+            except Exception:
+                pass
     finally:
+        trader.position_registry.remove_all("swing")
         _release_lock()
 
 if __name__ == "__main__":

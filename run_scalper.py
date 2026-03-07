@@ -13,48 +13,21 @@ import os
 import time
 import datetime
 import yaml
-import tempfile
 from datetime import timezone, timedelta
 
 from core.encoding_setup import setup_utf8_stdout
 setup_utf8_stdout()
 
-# ── 중복 실행 방지 (PID 파일 락) ──────────────────────────
-_PID_FILE = os.path.join(tempfile.gettempdir(), "firefeet_scalper.pid")
+from core.bot_lifecycle import BotLifecycle
 
-def _acquire_lock():
-    """이미 실행 중인 프로세스가 있으면 종료."""
-    if os.path.exists(_PID_FILE):
-        try:
-            with open(_PID_FILE) as f:
-                old_pid = int(f.read().strip())
-            # /proc 없는 macOS도 대응: os.kill(pid, 0) 로 생존 확인
-            os.kill(old_pid, 0)
-            print(f"[Scalper] ❌ 이미 실행 중입니다 (PID {old_pid}). 중복 실행 방지로 종료합니다.")
-            print(f"[Scalper]    기존 프로세스를 먼저 종료하세요: kill {old_pid}")
-            sys.exit(1)
-        except (ProcessLookupError, PermissionError, OSError):
-            # 프로세스 없음 → 좀비 PID 파일, 무시하고 계속
-            # OSError: Windows에서 os.kill(pid, 0) 미지원
-            pass
-        except ValueError:
-            pass  # PID 파일 손상 → 무시
-
-    with open(_PID_FILE, "w") as f:
-        f.write(str(os.getpid()))
-
-def _release_lock():
-    """종료 시 PID 파일 제거."""
-    try:
-        os.remove(_PID_FILE)
-    except FileNotFoundError:
-        pass
-
-_acquire_lock()
+_lifecycle = BotLifecycle("firefeet_scalper", close_time="1530")
+_lifecycle.setup_signal_handler()
+_lifecycle.acquire_lock()
 
 from core.config_loader import ConfigLoader
 from core.kis_auth import KISAuth
 from core.providers.kis_api import KISManager
+from core.providers.data_service import KISDataService
 from core.kis_websocket import KISWebSocket
 from core.discord_client import DiscordClient
 from core.execution.scanner import StockScanner
@@ -68,8 +41,8 @@ def is_market_hours():
     now = datetime.datetime.now(kst)
     if now.weekday() >= 5:
         return False
-    t = now.hour * 100 + now.minute
-    return 900 <= t <= 1530
+    now_str = f"{now.hour:02d}{now.minute:02d}"
+    return _lifecycle.is_market_hours(now_str)
 
 
 def main():
@@ -99,6 +72,7 @@ def main():
         manager = DummyManager(auth, account_info, mode=mode)
     else:
         manager = KISManager(auth, account_info, mode=mode)
+    data_service = KISDataService(manager)
 
     # HTS ID (체결통보용 — secrets.yaml에서 로드)
     secrets = loader.load_config()
@@ -107,8 +81,8 @@ def main():
     # Discord
     discord = DiscordClient(webhook_key="DISCORD_SCALP_WEBHOOK_URL")
 
-    # Scanner (기존 거래량 스캐너 재사용)
-    scanner = StockScanner(manager.get_top_volume_stocks)
+    # Scanner (기존 거래량 스캐너 재사용, DataService TTL 캐시 경유)
+    scanner = StockScanner(data_service.get_top_volume_stocks)
 
     # WebSocket (scalping_settings에서 max_subscriptions 로드)
     try:
@@ -121,6 +95,9 @@ def main():
 
     # Scalping Engine
     engine = ScalpEngine(manager, kis_ws, scanner, discord=discord, mode=mode)
+
+    # ── Stale position cleanup ──────────────────────────
+    engine.position_registry.cleanup_stale()
 
     # ── 미체결 주문 정리 (시작 시) ──────────────────────────
     print("[Scalper] 기존 미체결 주문 정리 중...")
@@ -143,7 +120,7 @@ def main():
         print(f"[Scalper] 미체결 정리 실패: {e}")
 
     # ── 3. 메인 루프 ──────────────────────────
-    temp_done = False
+    last_temp_time = 0  # 마지막 온도 계산 시각 (Unix timestamp, 0=미계산)
     last_scan_time = 0
     ws_connected = False
 
@@ -154,7 +131,7 @@ def main():
                 now_kst = datetime.datetime.now(timezone(timedelta(hours=9)))
                 timestamp = now_kst.strftime("%Y-%m-%d %H:%M:%S")
                 print(f"[{timestamp}] 장 운영시간 외 — 대기 중 (09:00~15:30 KST, 평일)")
-                temp_done = False
+                last_temp_time = 0  # 다음 장 시작 시 온도 재계산
 
                 # WebSocket 종료
                 if ws_connected:
@@ -168,26 +145,43 @@ def main():
 
             # ── 장 시작 시 초기화 ──────────────
 
-            # 온도 분석 (1회) — 실패 시 NEUTRAL 기본값으로 보수적 운영
-            if not temp_done:
-                print("\n🌡️ 장 시작 — Market Temperature 재계산...")
+            # 온도 분석 (30분 주기 장중 재계산)
+            temp_interval = 1800  # 30분
+            current_time_ts = time.time()
+            if current_time_ts - last_temp_time >= temp_interval:
+                is_recalc = last_temp_time > 0
+                label = "장중 온도 재계산" if is_recalc else "장 시작 — Market Temperature 계산"
+                print(f"\n🌡️ {label}...")
                 try:
                     mt = MarketTemperature()
-                    temp_result = mt.calculate()
+                    # Liquidity hint from orderbook spread
+                    liquidity_hint = None
+                    if engine.target_codes:
+                        spreads = []
+                        for _c in engine.target_codes[:5]:
+                            _s = engine.orderbook_analyzer.get_spread_bps(_c)
+                            if _s != float('inf') and _s > 0:
+                                spreads.append(_s)
+                        if spreads:
+                            liquidity_hint = {"spread_bps": sum(spreads) / len(spreads)}
+                    temp_result = mt.calculate(liquidity_data=liquidity_hint)
                     temp_report = mt.generate_report(temp_result)
                     print(temp_report)
                     engine.apply_temperature(temp_result)
                     if discord:
+                        prefix = "🔄 장중 재계산" if is_recalc else "🌡️ 장 시작"
                         discord.send(
-                            temp_report + f"\n\n⚙️ 스캘핑: "
+                            f"{prefix}\n{temp_report}\n\n⚙️ 스캘핑: "
                             f"threshold={engine.strategy.confidence_threshold}"
                         )
                 except Exception as e:
-                    print(f"[Temperature] 온도 계산 실패 — NEUTRAL 기본값 적용: {e}")
-                    engine.apply_temperature({"level": "NEUTRAL", "temperature": 0})
-                    if discord:
-                        discord.send(f"⚠️ 온도 계산 실패 — NEUTRAL 기본값으로 보수적 운영")
-                temp_done = True
+                    print(f"[Temperature] 온도 계산 실패 — 기존 설정 유지: {e}")
+                    if last_temp_time == 0:
+                        # 최초 실패 시 NEUTRAL 기본값
+                        engine.apply_temperature({"level": "NEUTRAL", "temperature": 0})
+                        if discord:
+                            discord.send(f"⚠️ 온도 계산 실패 — NEUTRAL 기본값으로 보수적 운영")
+                last_temp_time = current_time_ts
 
             # WebSocket 접속
             if not ws_connected:
@@ -252,6 +246,8 @@ def main():
         if engine.positions and not dry_run:
             print("[Scalper] 잔여 포지션 청산 중...")
             engine._force_exit_all("SCALP_SELL_SHUTDOWN")
+
+        engine.position_registry.remove_all("scalp")
 
         if ws_connected:
             kis_ws.unsubscribe_all()

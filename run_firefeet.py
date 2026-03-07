@@ -3,45 +3,21 @@ import os
 import yaml
 import time
 import datetime
-import tempfile
 from datetime import timezone, timedelta
 
 from core.encoding_setup import setup_utf8_stdout
 setup_utf8_stdout()
 
-# ── 중복 실행 방지 (PID 파일 락) ──────────────────────────
-_PID_FILE = os.path.join(tempfile.gettempdir(), "firefeet_main.pid")
+from core.bot_lifecycle import BotLifecycle
 
-def _acquire_lock():
-    """이미 실행 중인 프로세스가 있으면 종료."""
-    if os.path.exists(_PID_FILE):
-        try:
-            with open(_PID_FILE) as f:
-                old_pid = int(f.read().strip())
-            os.kill(old_pid, 0)
-            print(f"[Main] ❌ 이미 실행 중입니다 (PID {old_pid}). 중복 실행 방지로 종료합니다.")
-            print(f"[Main]    기존 프로세스를 먼저 종료하세요: kill {old_pid}")
-            sys.exit(1)
-        except (ProcessLookupError, PermissionError, OSError):
-            # OSError: Windows에서 os.kill(pid, 0) 미지원
-            pass
-        except ValueError:
-            pass
-    with open(_PID_FILE, "w") as f:
-        f.write(str(os.getpid()))
-
-def _release_lock():
-    """종료 시 PID 파일 제거."""
-    try:
-        os.remove(_PID_FILE)
-    except FileNotFoundError:
-        pass
-
-_acquire_lock()
+_lifecycle = BotLifecycle("firefeet_main", close_time="1530")
+_lifecycle.setup_signal_handler()
+_lifecycle.acquire_lock()
 
 from core.config_loader import ConfigLoader
 from core.kis_auth import KISAuth
 from core.providers.kis_api import KISManager
+from core.providers.data_service import KISDataService
 from core.analysis.technical import VolatilityBreakoutStrategy
 from core.discord_client import DiscordClient
 from core.execution.trader import FirefeetTrader
@@ -56,15 +32,18 @@ def is_market_hours():
     now = datetime.datetime.now(kst)
     if now.weekday() >= 5:
         return False
-    t = now.hour * 100 + now.minute
-    return 900 <= t <= 1530
+    now_str = f"{now.hour:02d}{now.minute:02d}"
+    return _lifecycle.is_market_hours(now_str)
 
 def main():
     print("=== Firefeet Auto Trading System ===")
     
     # 1. Initialize Components
     loader = ConfigLoader()
-    mode = "REAL" # Set to REAL for actual trading
+    mode = "PAPER"
+    if "--real" in sys.argv:
+        mode = "REAL"
+        print("⚠️  WARNING: REAL TRADING MODE ACTIVE")
     print(f"Mode: {mode}")
     
     config = loader.get_kis_config(mode=mode)
@@ -72,28 +51,33 @@ def main():
     
     auth = KISAuth(config)
     manager = KISManager(auth, account_info, mode=mode)
+    data_service = KISDataService(manager)
     strategy = VolatilityBreakoutStrategy(k=0.5)
     discord = DiscordClient()
     
-    # 2. Trader, Scanner & Screener Setup
-    bot = FirefeetTrader(manager, strategy, discard_client=discord)
-    scanner = StockScanner(primary_fetcher=manager.get_top_volume_stocks)
-    screener = StockScreener(strategy, discord=discord)
-    
-    # 2.5 Data Provider Setup for Screener
+    # 2.5 Data Provider Setup
     from core.analysis.supply import SupplyAnalyzer
     supply_analyzer = SupplyAnalyzer()
-    
+
     def screener_data_provider(code):
-        ohlc = manager.get_daily_ohlc(code)
-        time.sleep(0.5)
-        
-        investor_trend = manager.get_investor_trend(code)
+        ohlc = data_service.get_daily_ohlc(code)
+        investor_trend = data_service.get_investor_trend(code)
         supply = supply_analyzer.analyze_supply(investor_trend)
-        time.sleep(0.5)
-        current_data = manager.get_current_price(code)
-        time.sleep(0.5)
+        current_data = data_service.get_current_price(code)
         return ohlc, supply, current_data
+
+    def trading_data_provider(code):
+        """트레이딩 루프용 data provider → (df, current_price)"""
+        df = data_service.get_daily_ohlc(code)
+        price_data = data_service.get_current_price(code)
+        if price_data is None:
+            return None, None
+        return df, price_data["price"]
+
+    # 2. Trader, Scanner & Screener Setup
+    bot = FirefeetTrader(manager, strategy, discord_client=discord, data_provider_fn=trading_data_provider)
+    scanner = StockScanner(primary_fetcher=data_service.get_top_volume_stocks)
+    screener = StockScreener(strategy, discord=discord)
     
     # 3. Add Initial Targets from Watchlist
     try:
@@ -113,7 +97,8 @@ def main():
     if discord:
         discord.send("🔥 **Firefeet Trading Bot Started! (Dynamic Scanning Enabled)**")
 
-    temp_done = False  # 온도 분석은 장 시작 전 1회만
+    last_temp_time = 0  # 온도 분석 타임스탬프 (0 = 미계산)
+    TEMP_REFRESH_INTERVAL = 3600  # 1시간마다 갱신
 
     try:
         while True:
@@ -121,20 +106,21 @@ def main():
                 now = datetime.datetime.now(timezone(timedelta(hours=9)))
                 timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
                 print(f"[{timestamp}] 장 운영시간 외 — 대기 중 (09:00~15:30 KST, 평일)")
-                temp_done = False  # 다음 장 시작 시 온도 재계산
-                bot.sold_today = {}  # 다음 장 세션 초기화
-                bot.daily_realized_pnl = 0
-                bot.consecutive_sl_count = 0
-                bot.sl_brake_until = None
+                last_temp_time = 0  # 다음 장 시작 시 온도 재계산
+                bot.reset_daily()   # 날짜 변경 시에만 리셋 (장중 재시작 안전)
                 time.sleep(60)
                 continue
 
-            # 장 시작 시 온도 1회 재계산
-            if not temp_done:
-                print("\n🌡️ 장 시작 — Market Temperature 재계산...")
+            # 주기적 온도 갱신 (초기 계산 + 1시간마다)
+            if time.time() - last_temp_time > TEMP_REFRESH_INTERVAL:
+                is_refresh = last_temp_time > 0
+                label = "갱신" if is_refresh else "초기 계산"
+                print(f"\n🌡️ Market Temperature {label}...")
                 try:
                     mt = MarketTemperature()
                     temp_result = mt.calculate()
+                    if temp_result.get("degraded"):
+                        print("⚠️ 시장 온도 데이터 불완전 (일부 소스 무응답)")
                     temp_report = mt.generate_report(temp_result)
                     print(temp_report)
                     profiles = mt.config.get("strategy_profiles", {})
@@ -143,9 +129,9 @@ def main():
                         discord.send(temp_report + f"\n\n⚙️ 전략: k={strategy.k}, "
                                      f"TP={strategy.take_profit:+.1f}%, SL={strategy.stop_loss:.1f}%")
                 except Exception as e:
-                    print(f"[Temperature] 온도 계산 실패 (기본 전략 유지): {e}")
+                    print(f"[Temperature] 온도 계산 실패 (기존 전략 유지): {e}")
                 bot.trading_rules = bot._load_trading_rules()
-                temp_done = True
+                last_temp_time = time.time()
 
             # Refresh targets (온도 기반 동적 주기)
             scan_interval = bot.get_scan_interval()
