@@ -1,131 +1,29 @@
 # Firefeet - 한국 주식 자동매매 시스템
 
-## 프로젝트 개요
-
-변동성 돌파 전략(Larry Williams) 기반 한국 주식 자동매매 봇. KIS(한국투자증권) API로 실매매하며, 글로벌 시장 분석 + 뉴스 감성 + 경제 지표를 종합한 **시장 온도**로 전략 파라미터를 동적 조절한다.
+변동성 돌파 전략(Larry Williams) 기반 한국 주식 자동매매 봇. KIS(한국투자증권) API로 실매매하며, 시장 온도로 전략 파라미터를 동적 조절한다.
 
 ## 실행 방법
 
 ```bash
-# 자동매매 봇 (메인)
-python3 run_firefeet.py
-
-# 정기 리포트 데몬 (08:00~15:40 스케줄)
-python3 run_report_bot.py
-python3 run_report_bot.py --now  # 즉시 1회 실행
-
-# CLI 리포트
-python3 run_export.py macro|watchlist|reddit|econ|all
-python3 run_export.py chat 005930 "삼성전자"
-
-# 뉴스 알림 봇 (60초 폴링)
-python3 run_news_bot.py
-
-# 대시보드
-streamlit run dashboard.py
-
-# 거래 로그 조회
-python3 -m core.trade_logger
-
-# 시장 온도 단독 실행
-python3 -m core.market_temperature
+python3 run_ai_swing_bot.py           # AI 스윙 트레이딩 (메인)
+python3 run_ai_swing_bot.py --paper   # 페이퍼 트레이딩
+python3 run_firefeet.py               # 데이트레이딩 (변동성 돌파)
+python3 run_scalper.py                # 스캘핑 (PAPER)
+python3 run_scalper.py --mode REAL    # 스캘핑 (REAL)
+python3 run_deep_analysis.py          # AI 심층 분석
+python3 run_report_bot.py             # 정기 리포트 (08:00~15:40)
+python3 run_export.py macro|watchlist|all  # CLI 리포트
 ```
 
-## 아키텍처
+## 설계 제약 조건
 
-```
-Scanner(거래량 TOP) → Screener(복합스코어) → Trader(매매)
-                                               ↑
-                                     MarketTemperature(온도 → 전략 조절)
-                                       ├─ MacroModule (40%)
-                                       ├─ SentimentModule (35%)
-                                       └─ EconModule (25%)
-```
+이 시스템은 실제 돈이 오가는 트레이딩 봇이다. 구조 변경 시 반드시 검증할 것:
 
-### 핵심 트레이딩 흐름
-
-1. **MarketTemperature** — 장 시작 전 시황 분석 → 전략 파라미터(k, TP, SL) 동적 조절
-2. **StockScanner** — 5분마다 거래량 기반 종목 발굴 (KIS API + Naver 금융)
-3. **StockScreener** — 거래량 급증, 모멘텀, MA정렬, 수급, 돌파근접도 복합 스코어링
-4. **FirefeetTrader** — 10초 주기 매매 루프 (변동성 돌파 매수 / TP·SL·EOD 매도)
-
-## 디렉토리 구조
-
-```
-core/                        # 핵심 모듈
-├── kis_auth.py              # KIS OAuth2 인증 + 토큰 캐싱
-├── kis_manager.py           # KIS API (시세, 주문, 잔고)
-├── trader.py                # 메인 트레이딩 엔진
-├── strategy.py              # 변동성 돌파 전략 + 온도 적용
-├── scanner.py               # 거래량 기반 종목 스캐너
-├── screener.py              # 복합 스코어링 스크리너
-├── market_temperature.py    # 온도 오케스트레이터
-├── temperature/             # 온도 플러그인 모듈
-│   ├── base.py              # TempModule 인터페이스 + clamp
-│   ├── macro_module.py      # 미 지수, VIX, 환율, 채권
-│   ├── sentiment_module.py  # 뉴스 키워드 감성 분석
-│   └── econ_module.py       # 경제 지표 서프라이즈
-├── macro_analyzer.py        # yfinance 글로벌 지표 + 추세
-├── econ_calendar.py         # MarketWatch 경제 일정 파싱
-├── supply_analyzer.py       # 외국인/기관 수급 (KIS API)
-├── news_scraper.py          # 네이버 금융 뉴스
-├── news_analyzer.py         # MarketWatch + Google News RSS
-├── reddit_analyzer.py       # Reddit 감성 (현재 미연동)
-├── stock_agent.py           # Claude AI 종합 분석
-├── report_generator.py      # 통합 리포트 생성
-├── trade_logger.py          # 거래 CSV 로깅 + 수수료 계산
-├── discord_client.py        # Discord Webhook (1,900자 분할)
-└── config_loader.py         # YAML 설정 관리
-
-config/                      # 설정 파일
-├── secrets.yaml             # API 키 (gitignore 대상)
-├── secrets_template.yaml    # secrets 템플릿
-├── trading_settings.yaml    # 예산 (total_budget)
-├── temperature_config.yaml  # 온도 모듈별 ON/OFF, 가중치, 키워드
-├── watchlist.yaml           # 관심 종목
-├── screener_settings.yaml   # 스크리너 가중치/필터
-├── macro_config.yaml        # 매크로 지표 Phase별 ON/OFF
-├── agent_settings.yaml      # Claude AI 모델/가중치
-└── econ_calendar.yaml       # 경제 지표 필터
-
-logs/                        # 거래 로그 (trades.csv)
-docs/                        # 프로젝트 문서
-```
-
-## 설정 시스템
-
-모든 설정은 `config/*.yaml`에서 관리. 온도 모듈은 `temperature_config.yaml`에서 모듈/서브모듈 단위 ON/OFF + 가중치 + 키워드 커스터마이징 가능.
-
-### 온도 → 전략 매핑
-
-| 레벨 | 온도 범위 | k | TP | SL | 포지션% |
-|------|----------|-----|------|------|---------|
-| HOT | 70+ | 0.3 | 4.0% | -3.0% | 35% |
-| WARM | 40~69 | 0.4 | 3.5% | -3.0% | 30% |
-| NEUTRAL | -20~39 | 0.5 | 3.0% | -3.0% | 25% |
-| COOL | -60~-21 | 0.6 | 2.5% | -2.5% | 20% |
-| COLD | <-60 | 0.7 | 2.0% | -2.0% | 15% |
-
-## 수수료 구조
-
-```
-매수: 0.015%
-매도: 0.015% + 거래세 0.18%
-왕복: ~0.21%
-```
-
-## 외부 API
-
-| API | 모듈 | 용도 |
-|-----|------|------|
-| KIS (한국투자증권) | kis_auth, kis_manager | 시세, 주문, 잔고 |
-| yfinance | macro_analyzer | 미 지수, 환율, VIX, 채권 |
-| Naver Finance | scanner, news_scraper | 거래량 순위, 한국 뉴스 |
-| MarketWatch | econ_calendar, news_analyzer | 경제 일정, 글로벌 뉴스 |
-| Google News RSS | news_analyzer | 뉴스 fallback |
-| Discord Webhook | discord_client | 알림/리포트 |
-| Anthropic (Claude) | stock_agent | AI 종합 분석 |
-| Reddit (PRAW) | reddit_analyzer | 커뮤니티 감성 (미연동) |
+- **스캘핑 레이턴시**: 1.5초 루프에 추상화 레이어(이벤트 버스, 메시지 큐) 삽입 금지. 시그널→판단→주문은 최소 hop 직결.
+- **다중 프로세스 현실**: 스윙/스캘핑은 별도 PID. in-memory 싱글턴 공유 불가. 프로세스 간 상태 공유 시 Redis 또는 파일 락.
+- **주문 실패 시 롤백**: 부분 체결, API 타임아웃, 증거금 부족은 일상. 상태 불일치 복구 경로 필수 설계.
+- **용어 규율**: "Agent"는 자율적 의사결정 컴포넌트(AISwingAgent)에만 사용. 캐시/타이머/데이터 제공은 Service 또는 Manager.
+- **범용 패턴 경계**: 이벤트 버스, MSA, 액터 모델 등을 트레이딩 맥락 없이 적용하지 말 것. "이게 스캘핑 루프에 몇 ms 추가하나?" 먼저 질문.
 
 ## 개발 컨벤션
 
@@ -134,9 +32,33 @@ docs/                        # 프로젝트 문서
 - **시간**: KST 기준, `"%H%M"` 포맷 (예: `"1520"`)
 - **에러 처리**: 모듈별 try/except로 독립 실행. 하나 실패해도 나머지 계속 동작
 - **설정 변경**: YAML 파일만 수정하면 런타임에 반영 (trader는 매 루프 reload)
-- **뉴스 스크래핑**: Naver 금융은 `dd.articleSubject a` 셀렉터 사용
-- **온도 모듈**: `TempModule` 베이스 클래스 상속, `calculate()` → `{"score", "details"}` 반환
-- **테스트**: `test_*.py` 파일들이 루트에 존재 (pytest 아닌 직접 실행 방식)
+
+## 테스트
+
+```bash
+pytest tests/ -v                                    # 전체 (316 cases)
+pytest tests/test_strategy.py tests/test_trader.py -v   # 스윙 전략 (62 cases)
+pytest tests/test_scalp_*.py -v                     # 스캘핑
+pytest tests/test_web_api.py -v                     # 웹 API (17 cases)
+```
+
+소스→테스트 매핑:
+`technical.py` → `test_strategy.py`, `trader.py` → `test_trader.py`, `ai_swing_agent.py` → `test_ai_swing_agent.py`,
+`scalp_strategy.py` → `test_scalp_strategy.py`, `strategy_selector.py` → `test_scalp_strategy_selector.py`,
+`risk_manager.py` → `test_scalp_risk_manager.py`, `trade_logger.py` → `test_scalp_trade_logger.py`,
+`scalp_engine.py` → `integration/test_scalp_engine_flow.py`, `config/scalping_*.yaml` → `test_scalp_config_validation.py`,
+`web/backend/main.py` → `test_web_api.py`
+
+## 커스텀 에이전트 & 스킬
+
+에이전트 (`.claude/agents/` — 자율 판단):
+- `/agents/param-tune` — 전략 파라미터 튜닝 (데이터 기반 제안, 3중 충돌 방지)
+- `/agents/market-brief` — 장전 시황 브리핑 (온도 + 매크로 + 전략 프로필)
+- `/agents/incident` — 이상 거래 원인 추적 (파이프라인 타임라인 재구성)
+
+스킬 (`.claude/skills/` — 스크립트 기반 정형 작업):
+- `trade-review` — 거래 성과 분석 (`scripts/analyze_trades.py`)
+- `config-check` — 설정 정합성 검증 (`scripts/validate_config.py`)
 
 ## 알려진 이슈
 
