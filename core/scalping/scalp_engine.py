@@ -470,19 +470,20 @@ class ScalpEngine:
         if profile is None:
             return
 
-        # vwap_reversion 전략: VWAP 거리 -0.3~-1.5% 구간 종목만 평가 (Phase 3.1)
-        # VWAP 위에 있거나 VWAP에서 너무 많이 이탈한 종목은 bounce 가능성 낮음
+        # VWAP reversion 전략: VWAP -0.8% 이상 이탈 종목만 평가
         if profile.name == "vwap_reversion":
             vwap_dist = self.tick_buffer.get_vwap_distance(code)
-            if not (-1.5 <= vwap_dist <= -0.3):
+            if vwap_dist > -0.8:
                 return
 
         # 적응형 풀 스킵 체크 (Phase 3.2): 50사이클 연속 composite < 15이면 건너뜀
         if self._low_composite_cycles.get(code, 0) >= 50:
             return
 
-        # 기술적 분석 오버레이
+        # 변동성 게이트: ATR < 0.3%이면 진입 불가
         ta_overlay = self.ta_analyzer.analyze(code)
+        if ta_overlay and ta_overlay.atr_pct < 0.3:
+            return
 
         # 전략 평가
         result = self.strategy.evaluate(code, self.tick_buffer, self.orderbook_analyzer, profile=profile, ta_overlay=ta_overlay)
@@ -503,10 +504,7 @@ class ScalpEngine:
                   f"thr={result['threshold']:.2f} {'VETO' if veto else ''} "
                   f"enter={'✅' if result['should_enter'] else '❌'} "
                   f"| V:{sigs.get('vwap_reversion',0):.0f} "
-                  f"O:{sigs.get('orderbook_pressure',0):.0f} "
-                  f"M:{sigs.get('momentum_burst',0):.0f} "
-                  f"$:{sigs.get('volume_surge',0):.0f} "
-                  f"T:{sigs.get('micro_trend',0):.0f}")
+                  f"O:{sigs.get('orderbook_pressure',0):.0f}")
         if not result["should_enter"]:
             return
 
@@ -574,14 +572,21 @@ class ScalpEngine:
                 "temperature": self.strategy.temperature_level,
                 "sig_vwap": round(sigs.get("vwap_reversion", 0), 1),
                 "sig_ob": round(sigs.get("orderbook_pressure", 0), 1),
-                "sig_mom": round(sigs.get("momentum_burst", 0), 1),
-                "sig_vol": round(sigs.get("volume_surge", 0), 1),
-                "sig_trend": round(sigs.get("micro_trend", 0), 1),
+                "sig_mom": "",  # 비활성
+                "sig_vol": "",  # 비활성
+                "sig_trend": "",  # 비활성
                 "spread_bps": result.get("penalties", {}).get("spread", ""),
                 "penalty": result.get("penalties", {}).get("combined", ""),
                 "tp_pct": result.get("take_profit", ""),
                 "sl_pct": result.get("stop_loss", ""),
                 "vwap_dist": round(self.tick_buffer.get_vwap_distance(code), 4),
+                # VWAP reversion 확장 필드
+                "tick_rate_zscore": round(self.tick_buffer.get_tick_rate_zscore(code), 2),
+                "rolling_vwap_dist": round(self.tick_buffer.get_rolling_vwap_distance(code), 4),
+                "momentum_velocity": round(self.tick_buffer.get_momentum_reversal(code)[1], 4),
+                "atr_pct": round(ta_overlay.atr_pct, 4) if ta_overlay else "",
+                "regime": "reversion" if result["should_enter"] else "no_trade",
+                "entry_trigger": self._get_entry_trigger(code),
             }
             self.pending_orders[order_no] = {
                 "code": code,
@@ -616,6 +621,25 @@ class ScalpEngine:
             print(f"[ScalpEngine] 📋 매수 주문 접수: {name}({code}) {qty}주 @ {order_price:,}원 "
                   f"(주문번호={order_no}, conf={result['confidence']:.3f}, strategy={profile.name})")
 
+    def _get_entry_trigger(self, code):
+        """3조건 중 마지막으로 충족된 조건 식별 (로깅용)"""
+        vwap_dist = self.tick_buffer.get_vwap_distance(code)
+        tick_rate_z = self.tick_buffer.get_tick_rate_zscore(code)
+        vol_accel = self.tick_buffer.get_volume_acceleration(code)
+        is_reversing, _ = self.tick_buffer.get_momentum_reversal(code)
+
+        conditions = []
+        if vwap_dist < -0.8:
+            conditions.append("vwap")
+        if tick_rate_z >= 2.0 or vol_accel >= 2.0:
+            conditions.append("heat")
+        if is_reversing:
+            conditions.append("reversal")
+
+        if len(conditions) == 3:
+            return "all_met"
+        return ",".join(conditions) if conditions else "none"
+
     # ── Exit Logic ──────────────────────────
 
     def _eval_exit(self, code):
@@ -640,6 +664,20 @@ class ScalpEngine:
         # 트레일링 스탑 업데이트
         if current_price > pos["trailing_high"]:
             pos["trailing_high"] = current_price
+
+        # MAE/MFE 추적
+        if "min_price" not in pos:
+            pos["min_price"] = current_price
+        if "max_price" not in pos:
+            pos["max_price"] = current_price
+        if "time_to_peak" not in pos:
+            pos["time_to_peak"] = 0
+
+        if current_price < pos["min_price"]:
+            pos["min_price"] = current_price
+        if current_price > pos["max_price"]:
+            pos["max_price"] = current_price
+            pos["time_to_peak"] = hold_seconds
 
         # 리스크 매니저의 포지션 리스크 체크
         force_exit, risk_reason = self.risk_manager.check_position_risk(
@@ -741,6 +779,9 @@ class ScalpEngine:
                 "temperature": self.strategy.temperature_level,
                 "hold_seconds": round(hold_secs, 1),
                 "peak_profit_pct": round(peak, 3),
+                "mae": round((pos.get("min_price", buy_price) - buy_price) / buy_price * 100, 4) if buy_price > 0 else "",
+                "mfe": round((pos.get("max_price", buy_price) - buy_price) / buy_price * 100, 4) if buy_price > 0 else "",
+                "time_to_peak": round(pos.get("time_to_peak", 0), 1),
             }
             self.pending_orders[order_no] = {
                 "code": code,
