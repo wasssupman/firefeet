@@ -172,9 +172,7 @@ class ScalpStrategy:
 
     def should_exit(self, code, buy_price, current_price, hold_seconds, tick_buffer, orderbook_analyzer, confidence_threshold=0.15, profile=None, ta_overlay=None):
         """
-        매도 시그널 판단.
-        profile이 주어지면 profile의 TP/SL/max_hold 사용.
-        ta_overlay가 주어지면 동적 TP/SL + BB/SR 기반 추가 청산.
+        매도 시그널 판단 — 단순화된 3조건.
         Returns: (should_sell: bool, reason: str, is_market_order: bool)
         """
         if buy_price <= 0:
@@ -189,7 +187,7 @@ class ScalpStrategy:
         else:
             mode = self._get_mode()
             tp, sl = self._get_tp_sl(mode)
-            max_hold = self.settings.get("max_hold_seconds", 300)
+            max_hold = self.settings.get("max_hold_seconds", 120)
 
         # TAOverlay로 TP/SL 동적 조절
         if ta_overlay:
@@ -204,44 +202,8 @@ class ScalpStrategy:
         if profit_rate >= tp:
             return True, f"SCALP_SELL_TP({profit_rate:+.2f}%)", False
 
-        # 3. 시간 초과 — 지정가 (시장가 슬리피지 방지)
+        # 3. 시간 초과 — 지정가
         if hold_seconds >= max_hold:
-            return True, f"SCALP_SELL_TIMEOUT({hold_seconds}s)", False
-
-        # 4. 시그널 반전 — 조건부 청산 (히스테리시스 적용)
-        #    a) 최소 90초 보유 (시그널 안정화 대기)
-        #    b) -0.15% 이상 손실 중일 때만 (미세손실 무시)
-        #    c) 진입 threshold의 50% 이하로 떨어져야 청산 (히스테리시스)
-        signal_exit_cfg = self.settings.get("signal_exit", {})
-        sig_min_hold = signal_exit_cfg.get("min_hold_seconds", 90)
-        sig_min_loss = signal_exit_cfg.get("min_loss_pct", -0.15)
-        sig_exit_ratio = signal_exit_cfg.get("exit_threshold_ratio", 0.50)
-
-        if hold_seconds >= sig_min_hold and profit_rate <= sig_min_loss:
-            signals = self.signals.calculate_all(code, tick_buffer, orderbook_analyzer)
-            weights = profile.weights if profile else None
-            composite = self.signals.get_composite_score(signals, weights=weights)
-            entry_thresh = profile.confidence_threshold if profile else confidence_threshold
-            exit_threshold = entry_thresh * sig_exit_ratio
-            if composite / 100.0 < exit_threshold:
-                return True, f"SCALP_SELL_SIGNAL(score={composite:.1f})", True
-
-        # 5. BB 상단 터치 + 수익 중 → 조기 익절 (수수료 0.21% + 안전마진)
-        if ta_overlay and profit_rate > 0.25 and ta_overlay.bb_position > 0.9:
-            return True, f"SCALP_SELL_BB(pos={ta_overlay.bb_position:.2f})", False
-
-        # 6. 저항선 근접 + 수익 중 → 조기 익절 (수수료 0.21% + 안전마진)
-        if (ta_overlay and profit_rate > 0.25
-                and ta_overlay.nearest_resistance > 0
-                and ta_overlay.resistance_distance_pct < 0.05):
-            return True, "SCALP_SELL_RESISTANCE", False
-
-        # 7. 매도벽 감지 + 수익 중 → 조기 익절 (수수료 0.21% + 안전마진)
-        if profit_rate > 0.25:
-            walls = orderbook_analyzer.detect_large_orders(code, threshold_ratio=3.0)
-            ask_walls = [w for w in walls
-                         if w["side"] == "ask" and w["price"] <= current_price * 1.003]
-            if ask_walls:
-                return True, f"SCALP_SELL_WALL(ask@{ask_walls[0]['price']})", False
+            return True, f"SCALP_SELL_TIMEOUT({hold_seconds:.0f}s)", False
 
         return False, "", False

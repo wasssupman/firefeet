@@ -7,11 +7,8 @@ class ScalpSignals:
     def __init__(self, settings_path="config/scalping_settings.yaml"):
         self.settings = self._load_settings(settings_path)
         self.weights = self.settings.get("signal_weights", {
-            "vwap_reversion": 25,
-            "orderbook_pressure": 25,
-            "momentum_burst": 20,
-            "volume_surge": 15,
-            "micro_trend": 15,
+            "vwap_reversion": 80,
+            "orderbook_pressure": 20,
         })
 
     def _load_settings(self, path):
@@ -24,13 +21,14 @@ class ScalpSignals:
         return {}
 
     def calculate_all(self, code, tick_buffer, orderbook_analyzer):
-        """모든 시그널 계산 → {name: score} 딕셔너리"""
+        """활성 시그널 계산 → {name: score} 딕셔너리
+
+        VWAP Reversion 전환: micro_trend, momentum_burst, volume_surge 비활성.
+        vwap_reversion이 이벤트 트리거로 동작 (3조건 AND).
+        """
         return {
             "vwap_reversion": self.signal_vwap_reversion(code, tick_buffer),
             "orderbook_pressure": self.signal_orderbook_pressure(code, orderbook_analyzer),
-            "momentum_burst": self.signal_momentum_burst(code, tick_buffer),
-            "volume_surge": self.signal_volume_surge(code, tick_buffer),
-            "micro_trend": self.signal_micro_trend(code, tick_buffer),
         }
 
     def get_composite_score(self, signals, weights: dict = None):
@@ -48,52 +46,57 @@ class ScalpSignals:
     # ── Signal 1: VWAP Reversion (25%) ──────────────────
 
     def signal_vwap_reversion(self, code, tick_buffer):
-        """
-        VWAP 회귀: 가격이 VWAP 아래 0.3%+ → 거래량 증가 + 60초 추세 양전환 시 매수 시그널.
-        Score: 0 (VWAP 위 또는 하락 바이어스) ~ 100 (VWAP -1%+ 이하 + 거래량 급증 + 반등 추세)
+        """VWAP Deviation Reversion — 이벤트 기반 진입
+
+        3조건 AND — 하나라도 미충족 시 score=0:
+        1. VWAP 이격: vwap_dist < -0.8% (과매도, -0.6% 금지)
+        2. 거래 과열: tick_rate_zscore > 2.0 OR volume_accel > 2.0
+        3. 모멘텀 반전: mom_short > 0.1% AND mom_long < 0 (교차 조건)
+
+        추가 필터:
+        - 스프레드 < 20bps (orderbook_pressure에서 별도 처리)
+
+        Score: 0 (조건 미충족) ~ 100 (강한 reversion setup)
+        confidence는 최약 조건의 강도가 결정.
         """
         if not tick_buffer.has_enough_data(code, 30):
             return 0
 
-        vwap_dist = tick_buffer.get_vwap_distance(code)  # (price - vwap) / vwap * 100
-        vol_accel = tick_buffer.get_volume_acceleration(code)
+        # 조건 1: VWAP 이격도 (과매도)
+        vwap_dist = tick_buffer.get_vwap_distance(code)
+        if vwap_dist >= -0.8:
+            return 0  # VWAP 아래 0.8% 미만 이탈 → 기회 없음
 
-        # VWAP 위 0.1% 이상이면 비활성
-        if vwap_dist >= 0.1:
-            return 0
+        # 조건 2: 거래 과열 (volume spike + vwap deviation 동시 충족 시 허용)
+        tick_rate_z = tick_buffer.get_tick_rate_zscore(code, seconds=5, baseline_seconds=300)
+        vol_accel = tick_buffer.get_volume_acceleration(code, recent_seconds=30, avg_seconds=180)
+        if tick_rate_z < 2.0 and vol_accel < 2.0:
+            return 0  # 거래 과열 없음 → 진입 불가
 
-        # VWAP 근처(±0.1%) — 약한 기본 점수
-        if vwap_dist >= -0.1:
-            return 15
+        # 조건 3: 모멘텀 반전 (하락→상승 교차)
+        is_reversing, velocity_change = tick_buffer.get_momentum_reversal(code, short_window=10, long_window=30)
+        if not is_reversing:
+            return 0  # 반전 미확인 → 진입 불가
 
-        # VWAP 방향 바이어스: 60초 추세가 음수이면 반등 가능성 없음 → 0 반환
-        momentums = tick_buffer.get_momentums(code)
-        if momentums["60s"] <= 0:
-            return 0
-        trend_bonus = 15
+        # === 3조건 모두 충족 ===
+        # 각 조건의 강도를 개별 점수로 변환
 
-        # VWAP 아래 정도에 따라 기본 점수
+        # VWAP 이격 강도 (0.8% ~ 2.0%+ 범위를 30~50 점수로)
         abs_dist = abs(vwap_dist)
-        if abs_dist >= 1.0:
-            base_score = 70
-        elif abs_dist >= 0.5:
-            base_score = 55
-        elif abs_dist >= 0.3:
-            base_score = 40
+        if abs_dist >= 1.5:
+            dist_score = 50
+        elif abs_dist >= 1.0:
+            dist_score = 40
         else:
-            base_score = 25
+            dist_score = 30  # 0.8~1.0%
 
-        # 거래량 가속 보너스
-        if vol_accel >= 3.0:
-            vol_bonus = 15
-        elif vol_accel >= 2.0:
-            vol_bonus = 10
-        elif vol_accel >= 1.0:
-            vol_bonus = 5
-        else:
-            vol_bonus = 0
+        # 거래 과열 강도
+        heat_score = min(30, int(max(tick_rate_z, vol_accel) * 8))
 
-        return min(100, base_score + trend_bonus + vol_bonus)
+        # 반전 속도 강도
+        reversal_score = min(20, int(velocity_change * 40))
+
+        return min(100, dist_score + heat_score + reversal_score)
 
     # ── Signal 2: Orderbook Pressure (25%) ──────────────
 
