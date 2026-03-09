@@ -3,9 +3,9 @@ import time
 
 
 class TickBuffer:
-    """종목별 고정 크기 링 버퍼 (numpy 배열, 600틱 ~ 10분)"""
+    """종목별 고정 크기 링 버퍼 (numpy 배열, 3000틱 ~ 최대 180초)"""
 
-    def __init__(self, max_size=600):
+    def __init__(self, max_size=3000):
         self.max_size = max_size
         self._buffers = {}  # {code: buffer_data}
         self._candle_callback = None  # 캔들 완성 콜백
@@ -26,6 +26,10 @@ class TickBuffer:
             # VWAP 누적 (장 시작부터)
             "vwap_cum_pv": 0.0,  # sum(price * volume)
             "vwap_cum_vol": 0,   # sum(volume)
+            # Rolling VWAP (최근 N초)
+            "rolling_vwap_prices": [],   # deque 대신 list (틱 추가 시 append)
+            "rolling_vwap_volumes": [],
+            "rolling_vwap_timestamps": [],
             # 마이크로 캔들 집계
             "candles": {},       # {interval: {open, high, low, close, volume, start_time}}
         }
@@ -53,6 +57,11 @@ class TickBuffer:
         buf["vwap_cum_pv"] += price * volume
         buf["vwap_cum_vol"] += volume
 
+        # Rolling VWAP 데이터 축적
+        buf["rolling_vwap_prices"].append(price)
+        buf["rolling_vwap_volumes"].append(volume)
+        buf["rolling_vwap_timestamps"].append(timestamp)
+
         # 마이크로 캔들 업데이트
         self._update_candles(buf, code, price, volume, timestamp)
 
@@ -68,7 +77,7 @@ class TickBuffer:
         arr = buf[field]
         end = buf["index"]
         if count <= end:
-            return arr[end - count:end].copy()
+            return arr[end - count:end]
         else:
             return np.concatenate([arr[self.max_size - (count - end):], arr[:end]])
 
@@ -185,6 +194,121 @@ class TickBuffer:
             return 0.0
         return (up - down) / total
 
+    # -- Time-based Tick Direction Ratio --
+
+    def get_tick_direction_ratio_time(self, code, seconds=5):
+        """시간 기반 틱 방향 비율 (종목간 비교 가능, -1 ~ +1)"""
+        if code not in self._buffers:
+            return 0.0
+        buf = self._buffers[code]
+        if buf["count"] < 5:
+            return 0.0
+
+        now = time.time()
+        cutoff = now - seconds
+        timestamps = self._get_recent(code, "timestamps", buf["count"])
+        directions = self._get_recent(code, "directions", buf["count"])
+
+        mask = timestamps >= cutoff
+        if not np.any(mask):
+            return 0.0
+
+        window_dirs = directions[mask]
+        up = np.sum(window_dirs > 0)
+        down = np.sum(window_dirs < 0)
+        total = up + down
+        if total == 0:
+            return 0.0
+        return (up - down) / total
+
+    # -- Momentum Reversal --
+
+    def get_momentum_reversal(self, code, short_window=10, long_window=30):
+        """모멘텀 반전 감지: 하락→상승 전환 (교차 조건)
+
+        Returns: (is_reversing: bool, velocity_change: float)
+        - mom_short > +0.1% (최근 반등 시작, threshold로 noise 필터)
+        - mom_long < 0 (직전까지 하락 중)
+        - velocity_change = mom_short - mom_long
+        """
+        mom_short = self.get_momentum(code, short_window)
+        mom_long = self.get_momentum(code, long_window)
+
+        # 교차 조건: 단기 양전환(threshold) + 장기 아직 음
+        is_reversing = mom_short > 0.1 and mom_long < 0
+        velocity_change = mom_short - mom_long
+
+        return is_reversing, velocity_change
+
+    # -- Tick Rate Z-Score --
+
+    def get_tick_rate_zscore(self, code, seconds=5, baseline_seconds=300):
+        """z-score 정규화된 틱 강도 (종목간 비교 가능)
+
+        Returns: recent_rate / baseline_rate (1.0 = 평균, 3.0 = 3배 과열)
+        baseline이 0이면 0.0 반환.
+        """
+        if code not in self._buffers:
+            return 0.0
+        buf = self._buffers[code]
+        if buf["count"] < 10:
+            return 0.0
+
+        now = time.time()
+        timestamps = self._get_recent(code, "timestamps", buf["count"])
+
+        # 최근 N초 틱 수
+        recent_mask = timestamps >= (now - seconds)
+        recent_count = np.sum(recent_mask)
+        recent_rate = recent_count / seconds if seconds > 0 else 0
+
+        # 기준선 (최근 5분) 틱 수
+        baseline_mask = timestamps >= (now - baseline_seconds)
+        baseline_count = np.sum(baseline_mask)
+        baseline_rate = baseline_count / baseline_seconds if baseline_seconds > 0 else 0
+
+        if baseline_rate == 0:
+            return 0.0
+        return recent_rate / baseline_rate
+
+    # -- Rolling VWAP --
+
+    def get_rolling_vwap_distance(self, code, window_seconds=3600):
+        """최근 N초 Rolling VWAP 대비 이격도 (%)
+
+        Full-day VWAP와 별개로, 최근 1시간 데이터만으로 VWAP 계산.
+        오후 시간대 VWAP 고착(inertia) 문제 해결용.
+        """
+        if code not in self._buffers:
+            return 0.0
+        buf = self._buffers[code]
+
+        prices_list = buf["rolling_vwap_prices"]
+        volumes_list = buf["rolling_vwap_volumes"]
+        timestamps_list = buf["rolling_vwap_timestamps"]
+
+        if not prices_list:
+            return 0.0
+
+        now = time.time()
+        cutoff = now - window_seconds
+
+        # 윈도우 내 데이터만 필터 (뒤에서부터 탐색)
+        cum_pv = 0.0
+        cum_vol = 0
+        for i in range(len(timestamps_list) - 1, -1, -1):
+            if timestamps_list[i] < cutoff:
+                break
+            cum_pv += prices_list[i] * volumes_list[i]
+            cum_vol += volumes_list[i]
+
+        if cum_vol == 0:
+            return 0.0
+
+        rolling_vwap = cum_pv / cum_vol
+        current_price = prices_list[-1]
+        return (current_price - rolling_vwap) / rolling_vwap * 100
+
     # -- Micro Candles --
 
     CANDLE_INTERVALS = [5, 15, 30]  # seconds
@@ -243,6 +367,9 @@ class TickBuffer:
         if code in self._buffers:
             self._buffers[code]["vwap_cum_pv"] = 0.0
             self._buffers[code]["vwap_cum_vol"] = 0
+            self._buffers[code]["rolling_vwap_prices"] = []
+            self._buffers[code]["rolling_vwap_volumes"] = []
+            self._buffers[code]["rolling_vwap_timestamps"] = []
 
     def reset_all(self):
         """전체 버퍼 리셋"""
@@ -272,4 +399,6 @@ class TickBuffer:
             "momentums": self.get_momentums(code),
             "volume_accel": round(self.get_volume_acceleration(code), 2),
             "tick_ratio": round(self.get_tick_direction_ratio(code), 3),
+            "tick_rate_zscore": round(self.get_tick_rate_zscore(code), 2),
+            "rolling_vwap_dist": round(self.get_rolling_vwap_distance(code), 4),
         }
