@@ -110,14 +110,11 @@ class StrategySelector:
         return StrategyProfile(
             name="adaptive",
             weights={
-                "vwap_reversion": 25,
-                "orderbook_pressure": 25,
-                "momentum_burst": 20,
-                "volume_surge": 15,
-                "micro_trend": 15,
+                "vwap_reversion": 80,
+                "orderbook_pressure": 20,
             },
-            take_profit=1.0,
+            take_profit=0.6,
             stop_loss=-0.4,
             confidence_threshold=0.45,
-            max_hold_seconds=300,
+            max_hold_seconds=120,
         )

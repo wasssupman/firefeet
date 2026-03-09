@@ -1,61 +1,25 @@
 lunch_block_start: "1200"
-lunch_block_end:   "1520"              # 12시 이후 오후장 전체 차단 (기존 1330)
+lunch_block_end:   "1520"              # 12시 이후 오후장 전체 차단
 
 strategies:
-  - name: orb
-    active_times:
-      - {start: "0900", end: "0930"}
-    temperatures: any
-    signal_weights:
-      vwap_reversion:      5
-      orderbook_pressure: 20
-      momentum_burst:     40
-      volume_surge:       25
-      micro_trend:        10
-    confidence_threshold: 0.40         # 0.25 → 0.35 (D전략 필터)
-    take_profit:  1.2                  # 0.8 → 1.2 (R:R 개선)
-    stop_loss:   -0.5
-    max_hold_seconds: 180
-
-  - name: momentum_scalp
-    active_times:
-      - {start: "0930", end: "1200"}   # 오후 세션 제거 (기존 1330~1520)
-    temperatures: [HOT, WARM, NEUTRAL]
-    signal_weights:
-      vwap_reversion:     10
-      orderbook_pressure: 20
-      momentum_burst:     35
-      volume_surge:       25
-      micro_trend:        10
-    confidence_threshold: 0.40         # 0.22 → 0.35 (D전략 필터)
-    take_profit:  1.2                  # 0.8 → 1.2 (R:R 개선)
-    stop_loss:   -0.5
-    max_hold_seconds: 180
-
   - name: vwap_reversion
     active_times:
-      - {start: "1030", end: "1200"}   # 오후 세션 제거 (기존 1330~1430)
-    temperatures: [NEUTRAL, COOL, COLD]
+      - {start: "0930", end: "1200"}   # 09:00-09:30 제외 (VWAP 불안정)
+    temperatures: any                   # 변동성 게이트가 대체
     signal_weights:
-      vwap_reversion:     40
-      orderbook_pressure: 30
-      momentum_burst:     15
-      volume_surge:       10
-      micro_trend:         5
-    confidence_threshold: 0.40         # 0.20 → 0.35 (D전략 필터)
-    take_profit:  1.2                  # 0.7 → 1.2 (R:R 개선)
-    stop_loss:   -0.5
-    max_hold_seconds: 180
+      vwap_reversion: 80               # 핵심 이벤트 트리거
+      orderbook_pressure: 20           # 지지 확인용 보조
+    confidence_threshold: 0.45          # 엄선 진입
+    take_profit: 0.6                    # TP +0.6%
+    stop_loss: -0.4                     # SL -0.4%
+    max_hold_seconds: 120               # 2분 (reversion edge ~60-90초)
 
 adaptive:
   name: adaptive
   signal_weights:
-    vwap_reversion:     25
-    orderbook_pressure: 25
-    momentum_burst:     20
-    volume_surge:       15
-    micro_trend:        15
-  confidence_threshold: 0.35           # 0.20 → 0.35 (D전략 필터)
-  take_profit:  1.2                    # 0.7 → 1.2 (R:R 개선)
-  stop_loss:   -0.5
-  max_hold_seconds: 180
+    vwap_reversion: 80
+    orderbook_pressure: 20
+  confidence_threshold: 0.45
+  take_profit: 0.6
+  stop_loss: -0.4
+  max_hold_seconds: 120

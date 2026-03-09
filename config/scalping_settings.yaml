@@ -7,8 +7,8 @@ scalping_budget: 9000000
 default_confidence_threshold: 0.40
 
 # 손익 설정 (%)
-take_profit_pct: 1.5
-stop_loss_pct: -0.5
+take_profit_pct: 0.6
+stop_loss_pct: -0.4
 
 # 트레일링 스탑
 trailing_stop_activation: 0.50    # 수수료(0.21%) + 최소 마진 확보 후 활성화
@@ -21,7 +21,7 @@ signal_exit:
   exit_threshold_ratio: 0.0      # SIGNAL 청산 비활성화 (13건 전패 버그 — 진입시그널 재사용+손실게이트 구조결함)
 
 # 시간 제한
-max_hold_seconds: 180             # 최대 보유 시간 (3분)
+max_hold_seconds: 120             # 최대 보유 시간 (2분)
 eod_exit_time: "1515"             # 장 마감 전 전체 청산
 
 # 포지션 제한
@@ -37,23 +37,20 @@ max_price: 500000
 eval_interval_ms: 1500            # 1.5초
 
 # 틱 버퍼
-tick_buffer_size: 600             # 600틱 ≈ 10분
+tick_buffer_size: 3000            # 3000틱
 
 # 시그널 가중치 (합계 100)
 signal_weights:
-  vwap_reversion: 25
-  orderbook_pressure: 25
-  momentum_burst: 20
-  volume_surge: 15
-  micro_trend: 15
+  vwap_reversion: 80
+  orderbook_pressure: 20
 
 # 하이브리드 모드 설정
 hybrid:
   mode: "auto"                    # auto | micro_swing | aggressive
-  micro_swing_tp: 1.5             # 마이크로 스윙 TP (%)
-  micro_swing_sl: -0.5            # 마이크로 스윙 SL (%)
-  aggressive_tp: 2.0              # 공격적 스캘핑 TP (%)
-  aggressive_sl: -0.7             # 공격적 스캘핑 SL (%)
+  micro_swing_tp: 0.6             # 마이크로 스윙 TP (%)
+  micro_swing_sl: -0.4            # 마이크로 스윙 SL (%)
+  aggressive_tp: 0.6              # 공격적 스캘핑 TP (%)
+  aggressive_sl: -0.4             # 공격적 스캘핑 SL (%)
   switch_threshold: 40            # 온도 40+ → 공격적, 미만 → 마이크로
 
 # WebSocket 구독 제한
