@@ -20,6 +20,10 @@ class TradeLogger:
         "sig_vwap", "sig_ob", "sig_mom", "sig_vol", "sig_trend",
         "spread_bps", "penalty", "tp_pct", "sl_pct", "vwap_dist",
         "hold_seconds", "peak_profit_pct",
+        # VWAP reversion 확장 필드
+        "tick_rate_zscore", "rolling_vwap_dist", "momentum_velocity",
+        "atr_pct", "regime", "entry_trigger",
+        "mae", "mfe", "time_to_peak",
     ]
 
     def __init__(self, log_dir="logs", strategy="main"):
@@ -155,6 +159,15 @@ class TradeLogger:
             "tp_pct": kwargs.get("tp_pct", ""),
             "sl_pct": kwargs.get("sl_pct", ""),
             "vwap_dist": kwargs.get("vwap_dist", ""),
+            "tick_rate_zscore": kwargs.get("tick_rate_zscore", ""),
+            "rolling_vwap_dist": kwargs.get("rolling_vwap_dist", ""),
+            "momentum_velocity": kwargs.get("momentum_velocity", ""),
+            "atr_pct": kwargs.get("atr_pct", ""),
+            "regime": kwargs.get("regime", ""),
+            "entry_trigger": kwargs.get("entry_trigger", ""),
+            "mae": "",
+            "mfe": "",
+            "time_to_peak": "",
             "hold_seconds": "",
             "peak_profit_pct": "",
         }
@@ -207,6 +220,15 @@ class TradeLogger:
             "tp_pct": kwargs.get("tp_pct", ""),
             "sl_pct": kwargs.get("sl_pct", ""),
             "vwap_dist": kwargs.get("vwap_dist", ""),
+            "tick_rate_zscore": kwargs.get("tick_rate_zscore", ""),
+            "rolling_vwap_dist": kwargs.get("rolling_vwap_dist", ""),
+            "momentum_velocity": kwargs.get("momentum_velocity", ""),
+            "atr_pct": kwargs.get("atr_pct", ""),
+            "regime": kwargs.get("regime", ""),
+            "entry_trigger": kwargs.get("entry_trigger", ""),
+            "mae": kwargs.get("mae", ""),
+            "mfe": kwargs.get("mfe", ""),
+            "time_to_peak": kwargs.get("time_to_peak", ""),
             "hold_seconds": kwargs.get("hold_seconds", ""),
             "peak_profit_pct": kwargs.get("peak_profit_pct", ""),
         }
