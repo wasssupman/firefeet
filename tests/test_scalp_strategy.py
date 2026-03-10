@@ -242,8 +242,8 @@ class TestShouldExit:
         # SL/TP/TIMEOUT 안 걸리고, SIGNAL도 비활성화
         assert should is False
 
-    def test_bb_exit(self, mock_strategy, tb, oba):
-        """profit>0.25%, bb>0.9 -> (True, 'SCALP_SELL_BB')."""
+    def test_bb_exit_removed(self, mock_strategy, tb, oba):
+        """BB exit 제거됨 — profit>0.25%, bb>0.9 -> (False, '')."""
         buy_price = 50000
         current_price = 50200  # +0.4%
         overlay = make_ta_overlay(bb_position=0.95)
@@ -255,9 +255,8 @@ class TestShouldExit:
             ta_overlay=overlay,
         )
 
-        assert should is True
-        assert "SCALP_SELL_BB" in reason
-        assert is_market is False
+        assert should is False
+        assert reason == ""
 
     def test_no_exit_buy_price_zero(self, mock_strategy, tb, oba):
         """buy_price=0 -> (False, '', False)."""
@@ -269,14 +268,14 @@ class TestShouldExit:
         assert should is False
         assert reason == ""
 
-    def test_resistance_exit(self, mock_strategy, tb, oba):
-        """profit>0.25%, resistance 근접 -> SCALP_SELL_RESISTANCE."""
+    def test_resistance_exit_removed(self, mock_strategy, tb, oba):
+        """RESISTANCE exit 제거됨 — profit>0.25%, resistance 근접 -> (False, '')."""
         buy_price = 50000
         current_price = 50200  # +0.4%
         overlay = make_ta_overlay(
             nearest_resistance=50250,
             resistance_distance_pct=0.03,  # < 0.05
-            bb_position=0.5,  # BB exit 안 걸리게
+            bb_position=0.5,
         )
 
         should, reason, _ = mock_strategy.should_exit(
@@ -286,8 +285,8 @@ class TestShouldExit:
             ta_overlay=overlay,
         )
 
-        assert should is True
-        assert "RESISTANCE" in reason
+        assert should is False
+        assert reason == ""
 
 
 # ══════════════════════════════════════════════════════════════

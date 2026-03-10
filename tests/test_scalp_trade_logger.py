@@ -1,4 +1,4 @@
-"""TradeLogger 스캘핑 로깅 유닛 테스트 — 30컬럼 CSV 기록 검증."""
+"""TradeLogger 스캘핑 로깅 유닛 테스트 — 39컬럼 CSV 기록 검증."""
 
 import csv
 import pytest
@@ -20,9 +20,9 @@ def _read_csv_rows(logger):
 
 class TestCSVHeader:
 
-    def test_csv_header_30_columns(self, logger):
-        """CSV_HEADER가 정확히 30컬럼."""
-        assert len(TradeLogger.CSV_HEADER) == 30
+    def test_csv_header_39_columns(self, logger):
+        """CSV_HEADER가 정확히 39컬럼 (VWAP reversion 확장 필드 포함)."""
+        assert len(TradeLogger.CSV_HEADER) == 39
 
     def test_csv_header_written_on_init(self, logger):
         """초기화 시 CSV 헤더가 기록됨."""

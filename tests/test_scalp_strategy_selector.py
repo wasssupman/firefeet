@@ -22,20 +22,20 @@ def _make_kst_datetime(hour, minute):
 
 class TestStrategySelection:
 
-    def test_orb_at_0915(self, selector):
-        """09:15 -> orb 전략 선택."""
+    def test_vwap_reversion_at_0930(self, selector):
+        """09:30 -> vwap_reversion 전략 선택."""
         with patch("core.scalping.strategy_selector.datetime") as mock_dt:
-            mock_dt.datetime.now.return_value = _make_kst_datetime(9, 15)
+            mock_dt.datetime.now.return_value = _make_kst_datetime(9, 30)
             mock_dt.timezone = datetime.timezone
             mock_dt.timedelta = datetime.timedelta
 
             profile = selector.select()
 
         assert profile is not None
-        assert profile.name == "orb"
+        assert profile.name == "vwap_reversion"
 
-    def test_momentum_at_1000_hot(self, selector):
-        """10:00 + HOT -> momentum_scalp 선택."""
+    def test_vwap_reversion_at_1000_hot(self, selector):
+        """10:00 + HOT -> vwap_reversion 선택 (temperatures: any)."""
         selector.apply_temperature({"level": "HOT", "temperature": 80})
 
         with patch("core.scalping.strategy_selector.datetime") as mock_dt:
@@ -46,7 +46,7 @@ class TestStrategySelection:
             profile = selector.select()
 
         assert profile is not None
-        assert profile.name == "momentum_scalp"
+        assert profile.name == "vwap_reversion"
 
     def test_lunch_block_returns_none(self, selector):
         """12:30 -> 점심 구간 -> None."""
@@ -61,13 +61,12 @@ class TestStrategySelection:
 
     def test_adaptive_fallback(self, selector):
         """매칭 없을 때 -> adaptive."""
-        # COLD 온도에서 09:35 -> momentum_scalp는 [HOT,WARM,NEUTRAL]만 해당
-        # vwap_reversion은 1030~1200, orb는 0900~0930
-        # -> 모두 매칭 안 됨 -> adaptive fallback
+        # 15:25 -> vwap_reversion 활성시간(0930~1200) 외, 점심차단(1200~1520) 이후
+        # -> 전략 매칭 없음 -> adaptive fallback
         selector.apply_temperature({"level": "COLD", "temperature": -80})
 
         with patch("core.scalping.strategy_selector.datetime") as mock_dt:
-            mock_dt.datetime.now.return_value = _make_kst_datetime(9, 35)
+            mock_dt.datetime.now.return_value = _make_kst_datetime(15, 25)
             mock_dt.timezone = datetime.timezone
             mock_dt.timedelta = datetime.timedelta
 
@@ -96,17 +95,17 @@ class TestStrategySelection:
                     )
 
     def test_profile_tp_sl_from_config(self, selector):
-        """orb -> tp=1.2, sl=-0.5 (config에서)."""
+        """vwap_reversion -> tp=0.6, sl=-0.4 (config에서)."""
         with patch("core.scalping.strategy_selector.datetime") as mock_dt:
-            mock_dt.datetime.now.return_value = _make_kst_datetime(9, 15)
+            mock_dt.datetime.now.return_value = _make_kst_datetime(10, 0)
             mock_dt.timezone = datetime.timezone
             mock_dt.timedelta = datetime.timedelta
 
             profile = selector.select()
 
-        assert profile.take_profit == 1.2
-        assert profile.stop_loss == -0.5
-        assert profile.max_hold_seconds == 180
+        assert profile.take_profit == 0.6
+        assert profile.stop_loss == -0.4
+        assert profile.max_hold_seconds == 120
 
     def test_vwap_reversion_at_1100_cold(self, selector):
         """11:00 + COLD -> vwap_reversion 선택."""

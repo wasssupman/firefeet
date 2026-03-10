@@ -379,9 +379,9 @@ class TestCSVEndToEnd:
         rows = _read_csv_rows(engine.trade_logger.csv_path)
         assert len(rows) == 2
 
-        # 30컬럼 검증
+        # 39컬럼 검증 (VWAP reversion 확장 필드 + MAE/MFE 추가)
         for row in rows:
-            assert len(row) == 30, f"컬럼 수 {len(row)} != 30: {list(row.keys())}"
+            assert len(row) == 39, f"컬럼 수 {len(row)} != 39: {list(row.keys())}"
 
         buy_row = rows[0]
         assert buy_row["action"] == "SCALP_BUY"
@@ -532,3 +532,44 @@ class TestMarketPanicGuard:
         ]
         engine.update_targets(stocks)
         assert engine._target_change_rates.get("005930") == -7.2
+
+
+# ══════════════════════════════════════════════════════════════
+# 변동성 게이트 테스트
+# ══════════════════════════════════════════════════════════════
+
+
+class TestVolatilityGate:
+
+    def test_volatility_gate_blocks_entry(self, engine):
+        """ATR < 0.3%이면 진입 차단"""
+        code = "005930"
+        # 틱 데이터 추가
+        inject_ticks(engine.tick_buffer, code,
+                     [50000 + i for i in range(50)], directions=[1] * 50)
+        inject_orderbook(
+            engine.orderbook_analyzer, code,
+            bid_prices=[50050, 50000, 49950],
+            bid_volumes=[5000, 4000, 3000],
+            ask_prices=[50100, 50150, 50200],
+            ask_volumes=[2000, 1500, 1000],
+        )
+
+        # ta_analyzer.analyze가 낮은 ATR 반환하도록 mock
+        from core.technical.overlay import TAOverlay
+        low_atr = TAOverlay(atr_pct=0.1)  # 0.3% 미만
+
+        with patch("core.scalping.strategy_selector.datetime") as mock_dt, \
+             patch("core.scalping.risk_manager.datetime") as mock_rm_dt, \
+             patch.object(engine.ta_analyzer, 'analyze', return_value=low_atr):
+            mock_dt.datetime.now.return_value = _make_kst_datetime(10, 0)
+            mock_dt.timezone = datetime.timezone
+            mock_dt.timedelta = datetime.timedelta
+            mock_rm_dt.datetime.now.return_value = _make_kst_datetime(10, 0)
+            mock_rm_dt.timezone = datetime.timezone
+            mock_rm_dt.timedelta = datetime.timedelta
+
+            initial_positions = len(engine.positions)
+            engine._eval_entry(code)
+            assert len(engine.positions) == initial_positions  # 진입 없음
+            assert len(engine.pending_orders) == 0  # 주문도 없음
