@@ -23,12 +23,12 @@ python3 -m pytest tests/test_scalp_config_validation.py -v
 
 ```
 WebSocket (KIS)
-  ├─ on_tick ──────→ TickBuffer (VWAP, momentum, volume accel)
+  ├─ on_tick ──────→ TickBuffer (VWAP, rolling VWAP, momentum, tick rate z-score)
   ├─ on_orderbook ─→ OrderbookAnalyzer (imbalance, spread, velocity)
   └─ on_notice ────→ 체결 통보 → positions 업데이트 (_processed_orders로 이중 처리 방지)
 
 Scanner (3분 주기)
-  → ScalpScreener.filter_stocks()
+  → ScalpScreener.filter_stocks() (거래대금 + ATR 필터)
   → WebSocket rotate_subscriptions()
 
 MarketTemperature (30분 주기 장중 재계산)
@@ -42,7 +42,7 @@ ScalpEngine._eval_cycle() [1.5초 루프]
   ├─ EOD 강제 청산 (15:28 PAPER / 15:20 REAL)
   ├─ 서킷브레이커 확인
   ├─ 미체결 주문 관리 (15초 타임아웃)
-  ├─ 보유 종목별: _eval_exit()
+  ├─ 보유 종목별: _eval_exit() + MAE/MFE 추적
   └─ 타겟 종목별: _eval_entry()
 ```
 
@@ -50,12 +50,12 @@ ScalpEngine._eval_cycle() [1.5초 루프]
 
 ```
 core/scalping/
-├── scalp_engine.py          # 메인 오케스트레이터 (1.5초 루프)
-├── scalp_strategy.py        # 진입/청산 판단 (evaluate + should_exit)
-├── scalp_signals.py         # 5개 독립 시그널 계산기
+├── scalp_engine.py          # 메인 오케스트레이터 (1.5초 루프, 변동성 게이트, MAE/MFE)
+├── scalp_strategy.py        # 진입/청산 판단 (evaluate + should_exit 3조건)
+├── scalp_signals.py         # 2개 시그널 (VWAP reversion 이벤트 트리거 + orderbook)
 ├── strategy_selector.py     # 시간+온도 기반 전략 프로필 선택
 ├── risk_manager.py          # 리스크 한도 + 서킷브레이커
-├── tick_buffer.py           # 틱 링버퍼 (600틱, ~10분)
+├── tick_buffer.py           # 틱 링버퍼 (3000틱, ~180초, rolling VWAP)
 ├── orderbook_analyzer.py    # 호가 분석 (10호가)
 ├── scalp_screener.py        # 종목 필터링 + 스코어링
 └── __init__.py
@@ -66,18 +66,37 @@ config/
 └── scalping_strategies.yaml # 전략 프로필 정의 + 점심 차단
 
 tests/
-├── test_scalp_strategy.py          # evaluate + should_exit + temperature + SIGNAL 비활성화 회귀
-├── test_scalp_signals.py           # 5개 시그널 실제 계산 검증
+├── test_scalp_strategy.py          # evaluate + should_exit + temperature
+├── test_scalp_signals.py           # 시그널 계산 + TickBuffer 신규 메서드 + 3조건 AND
 ├── test_scalp_strategy_selector.py # 시간/온도 매칭 + 프로필 선택
 ├── test_scalp_risk_manager.py      # 리스크 한도 + 서킷브레이커 (이중 리셋 방지 포함)
 ├── test_scalp_screener.py          # 종목 필터링 + 스코어링 + ticks_to_cover 수수료 계산
-├── test_scalp_trade_logger.py      # 30컬럼 CSV 로깅
+├── test_scalp_trade_logger.py      # 39컬럼 CSV 로깅
 ├── test_scalp_config_validation.py # 설정 파일 일관성 (배포 전 필수)
 ├── integration/
-│   └── test_scalp_engine_flow.py   # 엔진 시나리오 (진입→청산 플로우)
+│   └── test_scalp_engine_flow.py   # 엔진 시나리오 (진입→청산 플로우, 변동성 게이트)
 └── mocks/
     └── mock_scalping.py            # TickBuffer/Orderbook 헬퍼
 ```
+
+## 전략: VWAP Deviation Reversion (2026-03-10 전환)
+
+### 설계 근거
+
+386건 거래 시뮬레이션 결과, 기존 5시그널 가중 합산(composite score) 방식은 **시그널에 엣지가 없었다**:
+- 세전 손익 -320K, 수수료 -1,529K → 순손익 -1,848K
+- 모든 confidence 밴드에서 건당 PnL 음수
+- conf↑ → 승률↓ (시그널 역전)
+- 5개 시그널 중 4개가 동일 데이터(tick_buffer) → 앙상블이 아닌 중복 계산
+
+**전환 방향**: "마이크로스트럭처 예측(composite score)" → **"VWAP Deviation Reversion(이벤트 트리거)"**
+
+핵심 개념: 평소 거래 안 함. 가격이 VWAP에서 0.8%+ 이탈 + 거래 과열 + 속도 반전 시에만 진입 → VWAP 복귀 노림.
+
+### 제약 조건
+- **Long-only**: 한국 개인투자자 공매도 불가 → 하방 이탈(VWAP 아래) 복귀만 가능
+- **수수료 0.21%**: TP 0.6% 시 필요 승률 42%
+- **1.5초 루프**: 레이턴시 추가 금지
 
 ## 매매 로직
 
@@ -90,13 +109,34 @@ tests/
 3. 데이터 충분성: TickBuffer에 30틱 이상
 4. 전략 선택: StrategySelector.select(시간, 온도) → StrategyProfile
    - None이면 진입 차단 (점심시간 12:00~15:20)
-5. 시그널 계산: ScalpStrategy.evaluate()
-   - 5개 시그널 → 가중 합산 → composite score (0~100)
+5. VWAP 필터: vwap_dist > -0.8% → 즉시 리턴
+6. 변동성 게이트: ATR < 0.3% → 즉시 리턴
+7. 시그널 계산: ScalpStrategy.evaluate()
+   - 이벤트 트리거 (3조건 AND) → confidence
    - 페널티 검사: spread_penalty × volume_penalty < 0.5 → 거부
-   - composite ≥ threshold → 진입 허용
-6. 리스크 확인: RiskManager.can_enter()
-   - 일일 손실 한도, 거래 횟수, 시간 제한, 포지션 금액
-7. 주문: place_order(BUY) → pending_orders 등록
+   - confidence ≥ threshold → 진입 허용
+8. 리스크 확인: RiskManager.can_enter()
+9. 주문: place_order(BUY) → pending_orders 등록
+```
+
+### 이벤트 트리거 (3조건 AND)
+
+```
+signal_vwap_reversion() — 하나라도 미충족 시 score = 0
+
+조건 1: VWAP 이격 (과매도)
+  └─ vwap_dist < -0.8% (고정, -0.6% 금지 — 수수료 불가)
+
+조건 2: 거래 과열
+  └─ tick_rate_zscore > 2.0 OR volume_accel > 2.0
+     (volume spike + vwap deviation 동시 충족 시에만 허용)
+
+조건 3: 모멘텀 반전 (하락→상승 교차)
+  └─ mom_short(10초) > +0.1% AND mom_long(30초) < 0
+     (2-3틱 바운스 noise 필터: threshold 0.1%)
+
+score = dist_score(30~50) + heat_score(max 30) + reversal_score(max 20)
+confidence = 최약 조건의 강도가 결정
 ```
 
 ### 청산 (_eval_exit)
@@ -105,74 +145,81 @@ tests/
 
 | 순서 | 조건 | 시그널 | 주문 타입 |
 |------|------|--------|-----------|
-| 1 | 건당 손실 한도 초과 | `RISK` | 시장가 |
+| 1 | 건당 손실률 초과 (max_loss_pct %) | `RISK` | 시장가 |
 | 2 | 트레일링 스탑 (수익 ≥ 0.5% 후 65% 이탈) | `TRAILING` | 시장가 |
-| 3 | 손절 (profit ≤ SL%) | `SL` | 시장가 |
-| 4 | 익절 (profit ≥ TP%) | `TP` | 지정가 |
-| 5 | 타임아웃 (hold ≥ 180초) | `TIMEOUT` | **지정가** |
-| 6 | ~~시그널 청산~~ | `SIGNAL` | **비활성화** |
-| 7 | BB 상단 (profit>0.25% + BB>0.9) | `BB` | 지정가 |
-| 8 | 저항선 근접 (profit>0.25% + 0.05% 이내) | `RESISTANCE` | 지정가 |
-| 9 | 매도벽 감지 (profit>0.25% + ask wall) | `WALL` | 지정가 |
+| 3 | 손절 (profit ≤ -0.4%) | `SL` | 시장가 |
+| 4 | 익절 (profit ≥ +0.6%) | `TP` | 지정가 |
+| 5 | 타임아웃 (hold ≥ 120초) | `TIMEOUT` | 지정가 |
 
-> **SIGNAL 청산 비활성화 (2026-03-03)**: 275거래 분석에서 SIGNAL 청산 13건이 전패(-92K).
-> 근본 원인: (1) `min_loss_pct` 게이트가 손실 거래만 선택 → 100% 패배 구조적 보장,
-> (2) 진입 시그널을 청산에 재사용 → 90초 후 자연 감쇠로 항상 발동.
-> `exit_threshold_ratio: 0.0`으로 비활성화. 기존 SIGNAL 대상 거래는 SL/TP/TIMEOUT으로 자연 분배.
+> **Exit 단순화 (2026-03-10)**: 기존 9개 → 5개. SIGNAL/BB/RESISTANCE/WALL exit 제거.
+> SIGNAL: 구조적 전패 (진입시그널 재사용 + 손실게이트), BB/RESISTANCE/WALL: reversion 전략과 충돌.
+> disposition effect 방지를 위해 time decay exit도 미적용.
 
-> **TIMEOUT 지정가 변경 (2026-03-03)**: 기존 시장가 → 지정가로 변경. 24건 -70K 슬리피지 출혈 감소.
+## 2개 시그널
 
-## 5개 시그널
+| 시그널 | 가중치 | 역할 | 데이터 소스 |
+|--------|--------|------|-------------|
+| VWAP Reversion | 80% | 핵심 이벤트 트리거 (3조건 AND) | TickBuffer (VWAP, tick rate z-score, momentum reversal) |
+| Orderbook Pressure | 20% | 지지 확인용 보조 필터 | OrderbookAnalyzer (imbalance, velocity, slope) |
 
-| 시그널 | 가중치 | 입력 데이터 | 점수 범위 |
-|--------|--------|-------------|-----------|
-| VWAP Reversion | 25% | VWAP 거리 + 거래량 가속 + 60초 추세 | 0~100 |
-| Orderbook Pressure | 25% | 매수/매도 불균형 + 속도 + 기울기 | 0~100 |
-| Momentum Burst | 20% | 틱 비율 + 10초 모멘텀 + 거래량 | 0~100 |
-| Volume Surge | 15% | 30초 거래량 / 180초 평균 | 0~100 |
-| Micro Trend | 15% | 10/30/60초 모멘텀 정렬 | 0~100 |
+> **비활성 시그널 (2026-03-10)**: Momentum Burst, Volume Surge, Micro Trend — 코드 존속, calculate_all()에서 제외.
+> 이유: 동일 tick_buffer 데이터 중복 계산 (앙상블 아닌 노이즈 증폭).
 
-composite = 가중 합산 (0~100), threshold 이상이면 진입.
+## TickBuffer 신규 메서드 (2026-03-10)
 
-### 시그널 품질 평가 (2026-03-03 분석)
-
-| 시그널 | 등급 | 비고 |
-|--------|------|------|
-| VWAP Reversion | B+ | 가장 유용. 60초 추세 조건이 진입 지연시킬 수 있음 |
-| Orderbook Pressure | B- | 스푸핑 필터 부재 |
-| Momentum Burst | C+ | 모멘텀 추격 위험 |
-| Volume Surge | C | 방향성 결여 — 패닉셀에도 고점수 |
-| Micro Trend | D+ | VWAP/Momentum과 중복, 폐지 검토 중 |
+| 메서드 | 용도 | 사용처 |
+|--------|------|--------|
+| `get_tick_rate_zscore(code, 5s, 300s)` | z-score 정규화 틱 강도 (종목간 비교) | 이벤트 트리거 조건 2 |
+| `get_momentum_reversal(code, 10s, 30s)` | 하락→상승 교차 감지 (threshold 0.1%) | 이벤트 트리거 조건 3 |
+| `get_rolling_vwap_distance(code, 3600s)` | 최근 60분 Rolling VWAP 이격도 | 로깅 (full-day VWAP와 비교) |
+| `get_tick_direction_ratio_time(code, 5s)` | 시간 기반 틱 방향 비율 | 분석용 |
 
 ## 핵심 파라미터
 
 | 항목 | 값 | 비고 |
 |------|---|------|
-| TP (기본) | **1.5%** | 2026-03-03 상향 (기존 1.2%). R:R 1.81 |
-| SL (기본) | -0.5% | |
+| TP | **+0.6%** | 2026-03-10 변경 (기존 1.5%). reversion edge ~0.8% |
+| SL | **-0.4%** | 2026-03-10 변경 (기존 -0.5%). R:R 1.5:1 |
 | 왕복 수수료 | ~0.21% | 매수 0.015% + 매도 0.015% + 거래세 0.18% |
-| min_price | **10,000원** | 2026-03-03 상향 (기존 3,000). 틱사이즈 불리 종목 제거 |
-| max_price | **500,000원** | 2026-03-03 상향 (기존 50,000). 삼전/하이닉스 포함 |
-| conf threshold | 0.40 (기본) | 온도/프로필에 따라 0.35~0.50 |
-| max_hold | 180초 (3분) | |
+| VWAP 이탈 임계값 | **-0.8%** | -0.6% 금지 (수수료 불가), -1.0% 빈도 부족 |
+| conf threshold | **0.45** | 2026-03-10 변경 (기존 0.40). 엄선 진입 |
+| max_hold | **120초** (2분) | 2026-03-10 변경 (기존 180초). reversion edge ~60-90초 |
+| tick_buffer_size | **3000틱** | 2026-03-10 변경 (기존 600). 대형주 180초 커버 |
 | eval_interval | 1,500ms | |
 | 매도 쿨다운 | 600초 (10분) | |
+| ATR 게이트 | ≥ 0.3% | 변동성 부족 시 진입 차단 |
 
-## 온도별 파라미터
+## MAE/MFE 추적 (2026-03-10 추가)
 
-| 레벨 | conf | max_pos | 모드 | TP | SL |
-|------|------|---------|------|----|----|
-| HOT | 0.35 | 3 | aggressive | 2.0% | -0.8% |
-| WARM | 0.38 | 2 | aggressive | 1.5% | -0.7% |
-| NEUTRAL | 0.40 | 2 | aggressive | 1.5% | -0.5% |
-| COOL | 0.45 | 2 | micro_swing | 1.0% | -0.5% |
-| COLD | 0.50 | 1 | micro_swing | 0.8% | -0.4% |
+보유 중 가격 극값을 실시간 추적하여 청산 시 CSV에 기록:
+
+| 필드 | 계산 | 용도 |
+|------|------|------|
+| `mae` | (min_price - buy_price) / buy_price × 100 | 최대 역행 — SL 최적화 |
+| `mfe` | (max_price - buy_price) / buy_price × 100 | 최대 순행 — TP 최적화 |
+| `time_to_peak` | MFE 도달 시점 (초) | 최적 보유 시간 분석 |
+
+## CSV 로깅 (39컬럼)
+
+기존 30컬럼 + VWAP reversion 확장 9컬럼:
+
+```
+tick_rate_zscore     — 정규화 틱 강도
+rolling_vwap_dist    — 60분 Rolling VWAP 이격도
+momentum_velocity    — 반전 속도 (mom_short - mom_long)
+atr_pct              — ATR %
+regime               — 'reversion' | 'no_trade'
+entry_trigger        — 3조건 충족 상태 (all_met/vwap/heat/reversal)
+mae                  — Max Adverse Excursion (%)
+mfe                  — Max Favorable Excursion (%)
+time_to_peak         — MFE 도달 시간 (초)
+```
 
 ## 리스크 규칙 (PAPER / REAL)
 
 | 항목 | PAPER | REAL |
 |------|-------|------|
-| 건당 최대 손실 | 20,000원 / 1.0% | 5,000원 / 0.5% |
+| 건당 최대 손실률 | 0.7% | 0.5% |
 | 건당 포지션 한도 | 2,000,000원 | 200,000원 |
 | 일일 최대 손실 | 200,000원 | 30,000원 |
 | 일일 거래 횟수 | 20건 | 50건 |
@@ -180,52 +227,15 @@ composite = 가중 합산 (0~100), threshold 이상이면 진입.
 | 진입 금지 시간 | ~09:00, 15:25~ | ~09:05, 15:10~ |
 | 강제 청산 시간 | 15:28 | 15:20 |
 
-## 시장 패닉 가드 (2026-03-03 추가)
+## 시장 패닉 가드
 
-KOSPI -7.24% 폭락 (미국-이란 전쟁) 시 봇이 삼성전자를 "틱 효율이 좋다"는 이유로 매수한 사건에서 발견된 구조적 결함 수정.
+### 3단계 방어 체계
 
-### 문제: 3가지 방어 부재
-
-1. **온도 1회 계산** — 장 시작 시 1회만 계산, 장중 급변 미반영
-2. **시그널 개별 종목만** — 5개 시그널 전부 개별 종목 데이터만 분석, 시장 전체 상황 무시
-3. **서킷브레이커 사후 대응** — 돈을 잃고 나서야 작동
-
-### 해결: 2단계 방어 체계
-
-**Level 1 — 종목 낙폭 필터 + 시장 패닉 가드**
-
-| 방어선 | 위치 | 동작 |
-|--------|------|------|
-| 급락 종목 차단 | `scalp_screener.py` | `change_rate ≤ -3%` 종목은 타겟에서 제외 |
-| 시장 패닉 감지 | `scalp_engine.py` | 30초마다 타겟 전종목 평균 하락률 체크 |
-| 진입 전면 차단 | `scalp_engine.py` | 평균 -2% 이하 또는 50%+ 급락 → 신규 매수 전면 중단 |
-
-설정 (`config/scalping_settings.yaml`):
-```yaml
-panic_guard:
-  enabled: true
-  avg_decline_threshold: -2.0    # 평균 하락률 임계값 (%)
-  crash_stock_pct: 50            # 급락 종목 비율 임계값 (%)
-  crash_stock_threshold: -3.0    # 개별 급락 기준 (%)
-  check_interval: 30             # 체크 주기 (초)
-```
-
-**Level 2 — 장중 온도 재계산 (30분 주기)**
-
-`run_scalper.py`에서 30분마다 `MarketTemperature` 재계산. 전쟁/폭락 시 VIX↑, 지수↓로 COLD 전환 → confidence 0.50, max_positions 1로 자동 조절.
-
-- 최초 실패: NEUTRAL 폴백
-- 재계산 실패: 기존 온도 유지 (덮어쓰지 않음)
-
-### 방어 흐름 (오늘 같은 폭락장)
-
-```
-09:00  온도=NEUTRAL (아침 계산)
-09:30  전쟁 뉴스 → KOSPI 급락
-09:31  스캐너: 삼성전자 -5% → screener: change_rate ≤ -3% → ❌ 타겟 제외
-09:31  패닉 가드: 타겟 평균 -4% → ❌ 전면 진입 차단
-09:30  온도 재계산: VIX↑, 지수↓ → COLD → threshold 0.50, max_positions 1
-```
+| Level | 위치 | 동작 |
+|-------|------|------|
+| 1 | `scalp_screener.py` | `change_rate ≤ -3%` 종목 타겟 제외 |
+| 2 | `scalp_engine.py` | 30초 주기 타겟 평균 하락률 감시, -2% 이하 시 진입 전면 차단 |
+| 3 | `run_scalper.py` | 30분 주기 온도 재계산, VIX↑/지수↓ → COLD 전환 |
 
 ## 설정 우선순위 (3중 threshold)
 
@@ -235,57 +245,92 @@ panic_guard:
     > 글로벌 기본값 (settings.default_confidence_threshold)
 ```
 
-evaluate() 호출 시: `max(profile.conf, 온도-조정-글로벌)` 사용.
-온도는 apply_temperature()로 글로벌 threshold를 업데이트하지만 profile이 우선.
+## PAPER 검증 계획 (2026-03-10~)
 
-## 수수료 분석 (275거래 기준, 2026-02-26)
+### Go/No-Go 기준 (2-3주 PAPER 데이터 수집 후)
+
+| 조건 | Go | No-Go |
+|------|-----|--------|
+| 건당 순PnL | > 0 | < 0 |
+| 승률 | > 42% | < 40% |
+| 일 시그널 빈도 | > 3건 | < 1건 |
+| 샘플 수 | > 30건 | < 15건 |
+
+**하나라도 No-Go → 전략 폐기 또는 근본 재설계.**
+
+Go 판정 시 → Phase 4 (RegimeDetector: reversion/no_trade 2분류) 진행.
+
+## 수수료 분석
+
+### 275거래 기준 (2026-02-26, 구 시그널)
 
 | 항목 | 값 |
 |------|---|
 | 세전 손익 | -20,254원 (거의 본전) |
 | 세후 손익 | -1,084,720원 |
 | **수수료 비중** | **총 손실의 98%** |
-| conf < 0.35 | 219거래, 43.4% 승률, -1.04M |
-| conf ≥ 0.35 | 56거래, 51.8% 승률, -127K |
-| **conf 필터 효과** | **손실 88% 감소** |
 
-핵심: 전략 자체는 본전이나 수수료가 모든 것을 삼킨다. conf ≥ 0.35 필터 + 12시 이후 차단(D전략)이 최적.
+### 386거래 기준 (2026-03-09, 구 시그널)
 
-## 버그 수정 이력 (2026-03-03)
+| 항목 | 값 |
+|------|---|
+| 세전 손익 | -320K |
+| 수수료 | -1,529K |
+| 순손익 | -1,848K |
+| 모든 conf 밴드 | 건당 PnL 음수 |
+
+핵심: **전략 자체에 엣지 없음 확정 → VWAP Reversion 이벤트 트리거로 전환.**
+
+## 변경 이력
+
+### 2026-03-10: VWAP Deviation Reversion 전환
+
+| 항목 | Before | After |
+|------|--------|-------|
+| 시그널 구조 | 5개 가중 합산 (composite) | 2개 (이벤트 트리거 + 보조) |
+| 진입 로직 | composite ≥ threshold | 3조건 AND (VWAP + 과열 + 반전) |
+| Exit 조건 | 9개 (SL/TP/TIMEOUT/SIGNAL/BB/RESISTANCE/WALL 등) | 5개 (RISK/TRAILING/SL/TP/TIMEOUT) |
+| TP / SL | 1.5% / -0.5% | 0.6% / -0.4% |
+| max_hold | 180초 | 120초 |
+| tick_buffer | 600틱 | 3000틱 + rolling VWAP + tick rate z-score |
+| conf threshold | 0.40 | 0.45 |
+| 전략 프로필 | orb + momentum_scalp + vwap_reversion | vwap_reversion 단일 |
+| 활성 시간 | 09:00-12:00 (3개 프로필) | 09:30-12:00 (VWAP 안정 후) |
+| 변동성 게이트 | 없음 | ATR < 0.3% 차단 |
+| MAE/MFE | 없음 | 실시간 추적 + CSV 기록 |
+| CSV 컬럼 | 30개 | 39개 |
+
+### 2026-03-03: 패닉 가드 + 버그 수정
 
 | 이슈 | 파일 | 내용 |
 |------|------|------|
-| SIGNAL 청산 구조결함 | `config/scalping_settings.yaml` | `exit_threshold_ratio: 0.50→0.0` — 13건 전패 제거 |
-| 서킷브레이커 이중 리셋 | `risk_manager.py` | `can_enter()` + `check_circuit_reset()` 이중 호출 시 카운트 중복 방지 |
-| ticks_to_cover 계산 오류 | `scalp_screener.py` | `0.21/(tick_pct*100)→0.21/tick_pct` — 100배 과소 계산 수정 |
-| WebSocket 이중 체결 | `scalp_engine.py` | `_processed_orders` 세트로 notice/API 폴링 간 경합 방지 |
-| TP 상향 | `config/scalping_settings.yaml` | `1.2%→1.5%` — R:R 1.39→1.81 |
-| min_price 상향 | `config/scalping_settings.yaml` | `3,000→10,000원` — 틱사이즈 불리 종목 제거 |
-| TIMEOUT 지정가 | `scalp_strategy.py` | 시장가→지정가 — 슬리피지 감소 |
-| max_price 상향 | `config/scalping_settings.yaml` | `50,000→500,000원` — 삼전/하이닉스 대형주 포함 |
-| 시장 패닉 가드 | `scalp_engine.py`, `scalp_screener.py` | 폭락장 매수 방지 — 급락종목 차단 + 시장 패닉 감지 |
-| 장중 온도 재계산 | `run_scalper.py` | 1회→30분 주기 — 장중 급변 시황 반영 |
+| SIGNAL 청산 구조결함 | `scalping_settings.yaml` | `exit_threshold_ratio: 0.0` — 13건 전패 제거 |
+| 서킷브레이커 이중 리셋 | `risk_manager.py` | 카운트 중복 방지 |
+| ticks_to_cover 계산 오류 | `scalp_screener.py` | 100배 과소 계산 수정 |
+| WebSocket 이중 체결 | `scalp_engine.py` | `_processed_orders` 세트 추가 |
+| 시장 패닉 가드 | `scalp_engine.py`, `scalp_screener.py` | 폭락장 매수 방지 |
+| 장중 온도 재계산 | `run_scalper.py` | 1회→30분 주기 |
 
 ## 소스 → 테스트 매핑
 
 | 소스 파일 | 테스트 파일 | 변경 시 업데이트 |
 |-----------|-----------|----------------|
-| `scalp_strategy.py` | `test_scalp_strategy.py` | evaluate/should_exit 시그니처, 청산 조건, 페널티 로직 |
-| `scalp_signals.py` | `test_scalp_signals.py` | 시그널 계산 로직, 새 시그널 추가 |
-| `strategy_selector.py` | `test_scalp_strategy_selector.py` | StrategyProfile 필드, 시간 매칭, 온도 매핑 |
-| `risk_manager.py` | `test_scalp_risk_manager.py` | 한도값, 서킷브레이커 조건, 시간 제한 |
-| `scalp_screener.py` | `test_scalp_screener.py` | 필터 조건, 스코어링, ticks_to_cover, 급락 필터 |
-| `scalp_engine.py` | `integration/test_scalp_engine_flow.py` | 진입/청산 플로우, pending 관리, 패닉 가드 |
-| `trade_logger.py` | `test_scalp_trade_logger.py` | CSV_HEADER, log_scalp_buy/sell 시그니처 |
-| `config/scalping_*.yaml` | `test_scalp_config_validation.py` | TP/SL 값, threshold, 시간대, weights |
+| `scalp_strategy.py` | `test_scalp_strategy.py` | evaluate/should_exit, 청산 조건, 페널티 |
+| `scalp_signals.py` | `test_scalp_signals.py` | 이벤트 트리거, 3조건 AND, TickBuffer 메서드 |
+| `strategy_selector.py` | `test_scalp_strategy_selector.py` | StrategyProfile, 시간 매칭, 온도 |
+| `risk_manager.py` | `test_scalp_risk_manager.py` | 한도값, 서킷브레이커, 시간 제한 |
+| `scalp_screener.py` | `test_scalp_screener.py` | 필터 조건, 스코어링, 급락 필터 |
+| `scalp_engine.py` | `integration/test_scalp_engine_flow.py` | 진입/청산 플로우, 변동성 게이트, MAE/MFE |
+| `trade_logger.py` | `test_scalp_trade_logger.py` | CSV_HEADER 39컬럼 |
+| `config/scalping_*.yaml` | `test_scalp_config_validation.py` | TP/SL, threshold, weights |
 
 ## 커맨드 치트시트
 
 ```bash
 # 테스트
-pytest tests/test_scalp_*.py tests/integration/test_scalp_*.py -v  # 스캘핑 전체 (163 cases)
+pytest tests/test_scalp_*.py tests/integration/test_scalp_*.py -v  # 스캘핑 전체
 pytest tests/test_scalp_config_validation.py -v                     # 설정 검증
-pytest tests/ -v --tb=short                                         # 전체 (pre-commit hook)
+pytest tests/ -v --tb=short                                         # 전체 (595 cases)
 
 # 실행
 python3 run_scalper.py                     # PAPER 모드
@@ -300,16 +345,15 @@ tail -f logs/scalp_trades_*.csv           # CSV 실시간
 ## TODO
 
 - [x] ~~SIGNAL 청산 로직 점검~~ — 비활성화 완료 (exit_threshold_ratio=0.0)
-- [x] ~~수수료 대비 TP/SL 최적화~~ — TP 1.2%→1.5% 상향, min_price 10,000원
-- [ ] Micro Trend 시그널 폐지 검토 — VWAP/Momentum과 중복 (D+ 등급), 가중치 재분배
-- [ ] Volume Surge 방향성 추가 — 매수 체결 비중 기반으로 패닉셀 필터링
-- [ ] Orderbook Pressure 스푸핑 필터 — 급변하는 허수 호가 감지
-- [ ] 매 사이클 YAML 리로드 캐싱 — 1.5초마다 17회 파일 I/O 성능 개선
-- [ ] WebSocket/메인루프 간 threading.Lock — GIL이 완화하지만 명시적 동기화 필요
-- [ ] TA overlay 실패 시 fallback — IntradayAnalyzer 에러 시 동적 TP/SL 미적용
-- [ ] 미체결 주문 타임아웃 재검토 — 설정 3초 vs 하드코딩 15초 불일치 (M-3)
-- [ ] adaptive 풀 회전 비대칭 — 50사이클 차단 후 해제가 3분 주기에 의존
-- [x] ~~장중 온도 재계산~~ — 30분 주기 재계산 완료 (run_scalper.py)
-- [ ] 20거래일 데이터 수집 후 파라미터 재분석 (D전략 2026-02-26 적용 시작)
-- [ ] 패닉 가드 Level 3 — 실시간 시장 레짐 감지 (KOSPI 지수 모니터링, sidecar/VI 감지)
-- [ ] "스캘핑" → "초단기 스윙(Micro Swing)" 정체성 전환 검토
+- [x] ~~수수료 대비 TP/SL 최적화~~ — TP 0.6%, SL -0.4%
+- [x] ~~Micro Trend 시그널 폐지~~ — calculate_all()에서 제외 (2026-03-10)
+- [x] ~~Volume Surge 방향성~~ — vwap_reversion 이벤트 트리거 내부 조건으로 흡수
+- [x] ~~장중 온도 재계산~~ — 30분 주기 재계산 완료
+- [x] ~~이벤트 트리거 전환~~ — 5시그널 가중합산 → 3조건 AND (2026-03-10)
+- [ ] 2-3주 PAPER 데이터 수집 → Go/No-Go 판단
+- [ ] Go 시: RegimeDetector (reversion/no_trade 2분류) 구현
+- [ ] Go 시: ORB 전략 복원 검토 (09:00-09:30 VWAP 안정성 데이터 기반)
+- [ ] 수수료 우대 협상 (0.21% → 0.05% 가능 시 수익 영역 극적 확장)
+- [ ] Orderbook Pressure 스푸핑 필터
+- [ ] 매 사이클 YAML 리로드 캐싱 — 1.5초마다 파일 I/O 성능 개선
+- [ ] 패닉 가드 Level 3 — 실시간 시장 레짐 감지 (KOSPI 지수 모니터링)
