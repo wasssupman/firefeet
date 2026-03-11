@@ -174,7 +174,9 @@ def main():
     screener = StockScreener(strategy=strategy, discord=discord)
     
     # 4. Strategy & Trader
-    trader = SwingTrader(manager, ai_agent, strategy=None, discord_client=discord)
+    # AI 비활성: 기계적 스윙 (strategy 게이트 + ATR TP/SL + trailing stop)
+    # AI 재활성화 시: use_ai=True로 변경
+    trader = SwingTrader(manager, ai_agent, strategy=strategy, discord_client=discord, use_ai=False)
     trader.position_registry.cleanup_stale()
 
     # 5. DART 실시간 공시 감지 (백그라운드 데몬 스레드)

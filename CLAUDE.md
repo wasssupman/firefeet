@@ -1,11 +1,25 @@
 # Firefeet - 한국 주식 자동매매 시스템
 
-변동성 돌파 전략(Larry Williams) 기반 한국 주식 자동매매 봇. KIS(한국투자증권) API로 실매매하며, 시장 온도로 전략 파라미터를 동적 조절한다.
+KIS(한국투자증권) API로 실매매하는 한국 주식 자동매매 봇. 3개의 독립 봇이 각각 별도 프로세스로 실행된다.
+
+## 봇 구조 (반드시 구분할 것)
+
+| 봇 | 실행 | 클래스 | 전략 | 보유기간 |
+|---|---|---|---|---|
+| **데이트레이딩** | `run_firefeet.py` | `FirefeetTrader` (trader.py) | 변동성 돌파 (Larry Williams) | 당일 (15:20 EOD 청산) |
+| **스윙 매매** | `run_ai_swing_bot.py` | `SwingTrader` (swing_trader.py) | 기계적 스윙 (스크리너+ATR) | 3~10일 오버나잇 |
+| **스캘핑** | `run_scalper.py` | `ScalpEngine` (scalp_engine.py) | VWAP Deviation Reversion | 초~분 단위 |
+
+**핵심 원칙**: 각 봇의 전략을 혼동하지 말 것.
+- `check_buy_signal()` (변동성 돌파) → **데이트레이딩 전용**. 스윙에서 사용 금지.
+- `should_sell()` (EOD 15:20 청산) → **데이트레이딩 전용**. 스윙은 오버나잇 보유.
+- `SwingTrader`는 `FirefeetTrader`를 상속하지만 **진입/청산 로직을 완전 오버라이드**.
+- `SwingTrader`의 `strategy` 객체는 ATR 계산/TP·SL 파라미터용이지 변동성 돌파용이 아님.
 
 ## 실행 방법
 
 ```bash
-python3 run_ai_swing_bot.py           # AI 스윙 트레이딩 (메인)
+python3 run_ai_swing_bot.py           # 스윙 매매 (메인, 기계적 모드)
 python3 run_ai_swing_bot.py --paper   # 페이퍼 트레이딩
 python3 run_firefeet.py               # 데이트레이딩 (변동성 돌파)
 python3 run_scalper.py                # 스캘핑 (PAPER)

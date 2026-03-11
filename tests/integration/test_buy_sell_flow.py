@@ -108,8 +108,9 @@ def test_full_buy_sell_cycle(mock_sleep, strategy, trading_settings):
     assert len(buy_orders) == 1, "Expected exactly one BUY order"
 
     # --- Phase 2: Price moves up to trigger TAKE PROFIT ---
-    # TP default = 3.0%, buy at 52000 → TP triggers at >= 52000 * 1.03 = 53560
-    tp_price = 54000
+    # ATR≈3000, atr_tp_multiplier=2.0 → effective TP = (3000*2)/52000 = 11.5%
+    # 52000 * 1.115 ≈ 58000, so use 59000
+    tp_price = 59000
     manager.set_current_price("005930", tp_price)
 
     trader.process_stock("005930", "1100", provider)
@@ -353,9 +354,9 @@ def test_buy_then_stop_loss(mock_sleep, strategy, trading_settings):
     }
     trader.stock_names["005930"] = "삼성전자"
 
-    # Price drops to trigger SL (default stop_loss = -3.0%)
-    # 50000 * (1 - 0.03) = 48500, so 48000 is below SL
-    sl_price = 48000
+    # ATR≈3000, atr_sl_multiplier=1.0 → effective SL = -(3000*1)/50000 = -6.0%
+    # 50000 * 0.94 = 47000, so use 46000
+    sl_price = 46000
     manager.set_current_price("005930", sl_price)
 
     initial_sl_count = trader.consecutive_sl_count
@@ -401,8 +402,9 @@ def test_multiple_stocks_portfolio_tracking(mock_sleep, strategy, trading_settin
 
     assert len(trader.portfolio) == 2
 
-    # Trigger TP for stock A: 52000 * 1.03 = 53560 → use 55000
-    tp_price_a = 55000
+    # ATR≈3000, atr_tp_multiplier=2.0 → effective TP ≈ 11.5%
+    # 52000 * 1.115 ≈ 58000, so use 59000
+    tp_price_a = 59000
     manager.set_current_price("005930", tp_price_a)
     # Stock B at neutral (no sell signal)
     manager.set_current_price("000660", buy_price_b)  # no profit, no loss

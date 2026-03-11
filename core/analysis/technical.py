@@ -3,13 +3,13 @@ import pandas as pd
 class VolatilityBreakoutStrategy:
     def __init__(self, k=0.5):
         self.k = k # Volatility constant (usually 0.5)
-        self.take_profit = 3.0
-        self.stop_loss = -3.0
+        self.take_profit = 4.0        # floor TP (NEUTRAL 기준, RR 2:1)
+        self.stop_loss = -2.0         # floor SL (NEUTRAL 기준)
         self.max_position_pct = 0.25
         self.min_screen_score = 30
         self.temperature_level = "NEUTRAL"
-        self.atr_sl_multiplier = 2.5  # ATR × M for structural stop loss
-        self.atr_tp_multiplier = 3.0  # ATR × M for structural take profit
+        self.atr_sl_multiplier = 1.0  # SL = ATR × 1.0 고정 (RR 비대칭 원칙)
+        self.atr_tp_multiplier = 2.0  # TP = ATR × 2.0 (NEUTRAL, RR 2:1)
 
     @staticmethod
     def calculate_atr(df, period=14):

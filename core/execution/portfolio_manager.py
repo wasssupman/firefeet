@@ -30,12 +30,16 @@ class PortfolioManager:
         self.target_codes = updated
         print(f"[Trader] Target list updated. Monitoring {len(self.target_codes)} stocks.")
 
+    # sync 시 보존할 커스텀 필드 (broker API에 없는 로컬 상태)
+    _PRESERVE_KEYS = frozenset({'buy_timestamp', 'high_price', 'unconfirmed'})
+
     def sync(self, manager, whitelist):
-        """Sync local portfolio with account balance."""
+        """Sync local portfolio with account balance. Preserves local-only fields."""
         balance = manager.get_balance()
         if not balance:
             return
 
+        old_portfolio = self.portfolio
         whitelist_set = set(whitelist)
         self.portfolio = {}
         skipped = []
@@ -44,11 +48,17 @@ class PortfolioManager:
             if code in whitelist_set:
                 skipped.append(f"{stock.get('name', code)}({code})")
                 continue
-            self.portfolio[code] = {
+            entry = {
                 "qty": stock['qty'],
                 "orderable_qty": stock.get('orderable_qty', stock['qty']),
                 "buy_price": float(stock.get('buy_price', 0))
             }
+            # 로컬 전용 필드 복원 (buy_timestamp, high_price 등)
+            old_entry = old_portfolio.get(code, {})
+            for key in self._PRESERVE_KEYS:
+                if key in old_entry:
+                    entry[key] = old_entry[key]
+            self.portfolio[code] = entry
             self.stock_names[code] = stock.get('name', 'Unknown')
         print(f"[Trader] Portfolio Synced: {len(self.portfolio)} items"
               + (f" (whitelist 제외: {', '.join(skipped)})" if skipped else ""))

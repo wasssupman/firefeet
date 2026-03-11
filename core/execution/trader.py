@@ -195,8 +195,22 @@ class FirefeetTrader:
             print(f"[Trader] {name}({code}) 시세 조회 실패: {e}")
             return
 
-        if not res or res['signal'] != "BUY":
+        if not res:
             return
+
+        target = res.get('target_price', 0)
+
+        if res['signal'] != "BUY":
+            if target > 0:
+                gap_pct = (target - current_price) / target * 100
+                if gap_pct <= 0.3:
+                    # 목표가 0.3% 이내 근접: 스크리닝 통과 종목이므로 매수 허용
+                    print(f"🔶 [Trader] {name}({code}) 근접 돌파 매수: 현재가={current_price:,} 목표가={target:,} (차이: {gap_pct:.2f}%)")
+                else:
+                    print(f"[Trader] {name}({code}) 돌파 대기: 현재가={current_price:,} 목표가={target:,} (차이: {gap_pct:+.2f}%)")
+                    return
+            else:
+                return
 
         # 매수 가능 여부 체크 (재매수 금지, 최대 보유 등)
         can, reason = self._can_buy(code)
@@ -216,32 +230,46 @@ class FirefeetTrader:
             print(f"⚠️  Budget exhausted. Remaining: {remaining:,.0f} / {total_budget:,} KRW")
             return
 
-        # 포지션 상한 (온도 기반)
+        # 리스크 기반 포지션 사이징
+        # qty = risk_amount / stop_distance (손절 시 항상 동일 금액 손실)
+        risk_pct = self.settings.get("risk_per_trade_pct", 1.0)
+        risk_amount = total_budget * (risk_pct / 100)
+
+        atr14 = res.get('atr14')
+        if atr14 and atr14 > 0:
+            stop_distance = atr14 * self.strategy.atr_sl_multiplier
+        else:
+            stop_distance = current_price * abs(self.strategy.stop_loss) / 100
+
+        if stop_distance <= 0:
+            stop_distance = current_price * 0.02  # fallback 2%
+
+        qty = int(risk_amount / stop_distance)
+
+        # 포지션 상한 (온도 기반 + 건당 최대 매수금액)
         max_pos_pct = getattr(self.strategy, 'max_position_pct', 0.25)
         max_per_stock = total_budget * max_pos_pct
 
-        # 건당 최대 매수금액 상한 (trading_rules)
         pos_rule = self.trading_rules.get("max_position_amount", {})
         if pos_rule.get("enabled", False):
             max_pos_amount = pos_rule.get("default_amount", total_budget * 0.15)
             max_per_stock = min(max_per_stock, max_pos_amount)
 
-        # 상위 N개 종목에 집중 배분
-        max_concurrent_targets = self.settings.get("max_concurrent_targets", 3)
-        unheld = [c for c in self.target_codes
-                  if c not in self.portfolio and c not in self.sold_today]
-        per_stock = min(remaining / max(1, min(len(unheld), max_concurrent_targets)), max_per_stock)
-        qty = int(per_stock // current_price)
-
-        # 최종 안전장치: 매수금액이 remaining 초과하지 않도록
         buy_amount = qty * current_price
+        if buy_amount > max_per_stock:
+            qty = int(max_per_stock // current_price)
+            buy_amount = qty * current_price
+
+        # 잔여 예산 초과 방지
         if buy_amount > remaining:
             qty = int(remaining // current_price)
             buy_amount = qty * current_price
 
         if qty <= 0:
-            print(f"⚠️  Per-stock budget ({per_stock:,.0f}) too small for price ({current_price:,}). Skipping.")
+            print(f"⚠️  Risk-based qty=0 (risk={risk_amount:,.0f}, stop_dist={stop_distance:,.0f}, price={current_price:,}). Skipping.")
             return
+
+        print(f"📐 사이징: risk={risk_amount:,.0f}원, SL거리={stop_distance:,.0f}원, 수량={qty}주, 금액={buy_amount:,.0f}원")
 
         # Execute Buy
         try:
@@ -277,7 +305,9 @@ class FirefeetTrader:
         if buy_price == 0:
             buy_price = current_price
 
-        signal = self.strategy.should_sell(current_price, buy_price, time_str)
+        # ATR 전달: should_sell의 ATR 기반 구조적 SL/TP 활성화
+        atr14 = self.strategy.calculate_atr(df, period=14)
+        signal = self.strategy.should_sell(current_price, buy_price, time_str, atr=atr14)
         if not signal:
             return
 

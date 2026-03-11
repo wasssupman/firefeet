@@ -2,7 +2,7 @@
 hard_stop_loss_pct: -7.0
 ai_min_buy_confidence: 80
 target_allocation_per_stock: 1000000
-hard_sl_atr_multiplier: 3.0
+hard_sl_atr_multiplier: 1.5  # ATR×1.5 SL (TP=ATR×2.0 대비 R:R 1.33:1)
 
 # 기본 규칙 (모든 온도에 적용)
 rules:
