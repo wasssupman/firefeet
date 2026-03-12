@@ -34,6 +34,10 @@ class FirefeetTrader:
         self.rules_path = "config/trading_rules.yaml"
         self.trading_rules = self._load_trading_rules()
 
+        # Cross-bot position awareness (예산 계산에서 다른 봇 보유분 제외)
+        from core.db.position_registry import PositionRegistry
+        self.position_registry = PositionRegistry()
+
         # Load initial portfolio
         self.sync_portfolio()
 
@@ -124,7 +128,40 @@ class FirefeetTrader:
         self._portfolio_mgr.sync(self.manager, self.settings.get("whitelist", []))
 
     def _get_total_invested(self):
-        return self._portfolio_mgr.get_total_invested(self.trade_logger.calc_buy_fee)
+        # 다른 봇(swing 등) 보유 종목은 예산 계산에서 제외
+        other_positions = self.position_registry.get_all_positions()
+        other_codes = {p['code'] for p in other_positions if p.get('bot_type') != 'daytrading'}
+        return self._portfolio_mgr.get_total_invested(self.trade_logger.calc_buy_fee, exclude_codes=other_codes)
+
+    # ── Position Sizing ─────────────────────────────────────────
+
+    def _size_position(self, current_price, stop_distance, max_budget, risk_pct_default=1.0):
+        """리스크 기반 포지션 사이징. qty = risk_amount / stop_distance.
+
+        Args:
+            current_price: 현재가
+            stop_distance: 손절 거리 (원 단위, 반드시 > 0)
+            max_budget: 이 종목에 투입 가능한 최대 금액
+            risk_pct_default: settings에 없을 때 기본 리스크 %
+        Returns:
+            qty (int): 매수 수량 (0이면 매수 불가)
+        """
+        total_budget = self.settings.get("total_budget", 1000000)
+        risk_pct = self.settings.get("risk_per_trade_pct", risk_pct_default)
+        risk_amount = total_budget * (risk_pct / 100)
+
+        qty = int(risk_amount / stop_distance) if stop_distance > 0 else 0
+
+        # 건당 최대 매수금액 상한
+        max_pos_rule = self.trading_rules.get("max_position_amount", {})
+        if max_pos_rule.get("enabled", False):
+            max_budget = min(max_budget, max_pos_rule.get("default_amount", max_budget))
+
+        buy_amount = qty * current_price
+        if buy_amount > max_budget:
+            qty = int(max_budget // current_price)
+
+        return qty
 
     # ── Intervals ─────────────────────────────────────────────
 
@@ -184,6 +221,11 @@ class FirefeetTrader:
 
         # 2. Strategy Signal
         if not is_held:
+            # 예산 조기 체크: remaining <= 0이면 API/시그널 연산 생략
+            total_budget = self.settings.get("total_budget", 1000000)
+            invested = self._get_total_invested()
+            if total_budget - invested <= current_price:
+                return
             self._process_buy(code, name, time_str, df, current_price)
         else:
             self._process_sell(code, name, time_str, df, current_price)
@@ -231,45 +273,27 @@ class FirefeetTrader:
             return
 
         # 리스크 기반 포지션 사이징
-        # qty = risk_amount / stop_distance (손절 시 항상 동일 금액 손실)
-        risk_pct = self.settings.get("risk_per_trade_pct", 1.0)
-        risk_amount = total_budget * (risk_pct / 100)
-
         atr14 = res.get('atr14')
         if atr14 and atr14 > 0:
             stop_distance = atr14 * self.strategy.atr_sl_multiplier
         else:
             stop_distance = current_price * abs(self.strategy.stop_loss) / 100
-
         if stop_distance <= 0:
             stop_distance = current_price * 0.02  # fallback 2%
 
-        qty = int(risk_amount / stop_distance)
-
-        # 포지션 상한 (온도 기반 + 건당 최대 매수금액)
         max_pos_pct = getattr(self.strategy, 'max_position_pct', 0.25)
-        max_per_stock = total_budget * max_pos_pct
+        max_budget = min(remaining, total_budget * max_pos_pct)
 
-        pos_rule = self.trading_rules.get("max_position_amount", {})
-        if pos_rule.get("enabled", False):
-            max_pos_amount = pos_rule.get("default_amount", total_budget * 0.15)
-            max_per_stock = min(max_per_stock, max_pos_amount)
-
-        buy_amount = qty * current_price
-        if buy_amount > max_per_stock:
-            qty = int(max_per_stock // current_price)
-            buy_amount = qty * current_price
-
-        # 잔여 예산 초과 방지
-        if buy_amount > remaining:
-            qty = int(remaining // current_price)
-            buy_amount = qty * current_price
+        qty = self._size_position(current_price, stop_distance, max_budget, risk_pct_default=1.0)
 
         if qty <= 0:
+            risk_pct = self.settings.get("risk_per_trade_pct", 1.0)
+            risk_amount = total_budget * (risk_pct / 100)
             print(f"⚠️  Risk-based qty=0 (risk={risk_amount:,.0f}, stop_dist={stop_distance:,.0f}, price={current_price:,}). Skipping.")
             return
 
-        print(f"📐 사이징: risk={risk_amount:,.0f}원, SL거리={stop_distance:,.0f}원, 수량={qty}주, 금액={buy_amount:,.0f}원")
+        buy_amount = qty * current_price
+        print(f"📐 사이징: risk={self.settings.get('total_budget', 1000000) * self.settings.get('risk_per_trade_pct', 1.0) / 100:,.0f}원, SL거리={stop_distance:,.0f}원, 수량={qty}주, 금액={buy_amount:,.0f}원")
 
         # Execute Buy
         try:

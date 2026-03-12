@@ -45,6 +45,10 @@ class PortfolioManager:
         skipped = []
         for stock in balance['holdings']:
             code = stock['code']
+            # 비주식 상품(ETN, 신주인수권 등) 필터: 종목코드는 6자리
+            if len(code) != 6:
+                skipped.append(f"{stock.get('name', code)}({code})")
+                continue
             if code in whitelist_set:
                 skipped.append(f"{stock.get('name', code)}({code})")
                 continue
@@ -60,13 +64,30 @@ class PortfolioManager:
                     entry[key] = old_entry[key]
             self.portfolio[code] = entry
             self.stock_names[code] = stock.get('name', 'Unknown')
-        print(f"[Trader] Portfolio Synced: {len(self.portfolio)} items"
-              + (f" (whitelist 제외: {', '.join(skipped)})" if skipped else ""))
+        # 브로커 미반영 unconfirmed 포지션 복원 (체결 지연 대응)
+        restored = []
+        for code, old_entry in old_portfolio.items():
+            if old_entry.get('unconfirmed') and code not in self.portfolio:
+                self.portfolio[code] = old_entry
+                restored.append(code)
+        suffix = ""
+        if skipped:
+            suffix += f" (제외: {', '.join(skipped)})"
+        if restored:
+            suffix += f" (미체결 복원: {', '.join(restored)})"
+        print(f"[Trader] Portfolio Synced: {len(self.portfolio)} items{suffix}")
 
-    def get_total_invested(self, calc_buy_fee_fn):
-        """현재 포트폴리오 총 투자금액 계산 (수수료 포함)."""
+    def get_total_invested(self, calc_buy_fee_fn, exclude_codes=None):
+        """현재 포트폴리오 총 투자금액 계산 (수수료 포함).
+
+        Args:
+            exclude_codes: 예산 계산에서 제외할 종목 코드 set (다른 봇 보유분)
+        """
+        exclude = exclude_codes or set()
         total = 0
-        for p in self.portfolio.values():
+        for code, p in self.portfolio.items():
+            if code in exclude:
+                continue
             amount = p["qty"] * p["buy_price"]
             fee = p.get("buy_fee", calc_buy_fee_fn(amount))
             total += amount + fee
