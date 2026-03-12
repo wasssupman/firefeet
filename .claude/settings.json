@@ -2,5 +2,17 @@
   "enabledPlugins": {
     "context7@claude-plugins-official": true,
     "oh-my-claudecode@omc": true
+  },
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .claude/hooks/bot-context.mjs"
+          }
+        ]
+      }
+    ]
   }
 }
