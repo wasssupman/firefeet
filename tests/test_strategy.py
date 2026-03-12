@@ -105,15 +105,15 @@ class TestShouldSell:
 
     def test_sell_take_profit(self, strategy):
         """profit_rate >= take_profit → SELL_TAKE_PROFIT."""
-        # take_profit default = 3.0%
-        result = strategy.should_sell(current_price=103000, buy_price=100000,
+        # take_profit default = 4.0%
+        result = strategy.should_sell(current_price=104500, buy_price=100000,
                                       current_time_str="1200")
         assert result == "SELL_TAKE_PROFIT"
 
     def test_sell_stop_loss(self, strategy):
         """profit_rate <= stop_loss → SELL_STOP_LOSS."""
-        # stop_loss default = -3.0%
-        result = strategy.should_sell(current_price=97000, buy_price=100000,
+        # stop_loss default = -2.0%
+        result = strategy.should_sell(current_price=97500, buy_price=100000,
                                       current_time_str="1200")
         assert result == "SELL_STOP_LOSS"
 
@@ -275,47 +275,47 @@ class TestContractionRatio:
 class TestShouldSellWithATR:
 
     def test_atr_widens_stop_loss(self, strategy):
-        """ATR 기반 SL이 고정 SL(-3%)보다 넓으면 ATR 사용."""
-        # buy=100000, atr=5000, multiplier=2.5 → ATR SL = -12.5%
-        # Fixed SL = -3%. ATR이 더 넓으므로 -12.5% 적용
-        # price=90000 → profit_rate=-10% → 고정SL에선 trigger, ATR SL(-12.5%)에선 아님
-        result = strategy.should_sell(current_price=90000, buy_price=100000,
+        """ATR 기반 SL이 고정 SL(-2%)보다 넓으면 ATR 사용."""
+        # buy=100000, atr=5000, multiplier=1.0 → ATR SL = -5%
+        # Fixed SL = -2%. ATR이 더 넓으므로 -5% 적용
+        # price=96000 → profit_rate=-4% → 고정SL(-2%)에선 trigger, ATR SL(-5%)에선 아님
+        result = strategy.should_sell(current_price=96000, buy_price=100000,
                                       current_time_str="1200", atr=5000)
-        assert result is None  # -10% > -12.5%, 아직 안 잘림
+        assert result is None  # -4% > -5%, 아직 안 잘림
 
     def test_atr_sl_triggers_at_threshold(self, strategy):
         """ATR SL 임계치 도달 시 매도."""
-        # buy=100000, atr=5000, multiplier=2.5 → ATR SL = -12.5%
-        result = strategy.should_sell(current_price=87000, buy_price=100000,
+        # buy=100000, atr=5000, multiplier=1.0 → ATR SL = -5%
+        result = strategy.should_sell(current_price=94500, buy_price=100000,
                                       current_time_str="1200", atr=5000)
-        assert result == "SELL_STOP_LOSS"  # -13% <= -12.5%
+        assert result == "SELL_STOP_LOSS"  # -5.5% <= -5%
 
     def test_fixed_sl_used_as_floor(self, strategy):
         """ATR SL이 고정 SL보다 좁으면 고정 SL 사용 (floor)."""
-        # buy=100000, atr=500, multiplier=2.5 → ATR SL = -1.25%
-        # Fixed SL = -3%. 고정이 더 넓으므로 -3% 적용
-        result = strategy.should_sell(current_price=98000, buy_price=100000,
+        # buy=100000, atr=500, multiplier=1.0 → ATR SL = -0.5%
+        # Fixed SL = -2%. 고정이 더 넓으므로 -2% 적용
+        result = strategy.should_sell(current_price=99000, buy_price=100000,
                                       current_time_str="1200", atr=500)
-        assert result is None  # -2% > -3%, 안 잘림
+        assert result is None  # -1% > -2%, 안 잘림
 
     def test_atr_widens_take_profit(self, strategy):
-        """ATR 기반 TP가 고정 TP(3%)보다 넓으면 ATR 사용."""
-        # buy=100000, atr=5000, multiplier=3.0 → ATR TP = 15%
-        # Fixed TP = 3%. ATR이 더 넓으므로 15% 적용
-        # price=110000 → profit_rate=10% → 고정TP에선 trigger, ATR TP(15%)에선 아님
-        result = strategy.should_sell(current_price=110000, buy_price=100000,
+        """ATR 기반 TP가 고정 TP(4%)보다 넓으면 ATR 사용."""
+        # buy=100000, atr=5000, multiplier=2.0 → ATR TP = 10%
+        # Fixed TP = 4%. ATR이 더 넓으므로 10% 적용
+        # price=108000 → profit_rate=8% → 고정TP(4%)에선 trigger, ATR TP(10%)에선 아님
+        result = strategy.should_sell(current_price=108000, buy_price=100000,
                                       current_time_str="1200", atr=5000)
-        assert result is None  # 10% < 15%, 아직 TP 안 됨
+        assert result is None  # 8% < 10%, 아직 TP 안 됨
 
     def test_no_atr_uses_fixed(self, strategy):
         """atr=None → 기존 고정 % 사용 (호환성)."""
-        result = strategy.should_sell(current_price=97000, buy_price=100000,
+        result = strategy.should_sell(current_price=97500, buy_price=100000,
                                       current_time_str="1200", atr=None)
-        assert result == "SELL_STOP_LOSS"  # -3% <= -3%
+        assert result == "SELL_STOP_LOSS"  # -2.5% <= -2%
 
     def test_atr_zero_uses_fixed(self, strategy):
         """atr=0 → 기존 고정 % 사용."""
-        result = strategy.should_sell(current_price=97000, buy_price=100000,
+        result = strategy.should_sell(current_price=97500, buy_price=100000,
                                       current_time_str="1200", atr=0)
         assert result == "SELL_STOP_LOSS"
 
@@ -355,19 +355,19 @@ class TestCheckBuySignalContraction:
 class TestApplyTemperatureATR:
 
     PROFILES_WITH_ATR = {
-        "HOT": {"k": 0.3, "take_profit": 4.0, "stop_loss": -3.0,
-                "atr_sl_multiplier": 2.0, "atr_tp_multiplier": 3.5},
-        "NEUTRAL": {"k": 0.5, "take_profit": 3.0, "stop_loss": -3.0},
+        "HOT": {"k": 0.3, "take_profit": 5.0, "stop_loss": -2.0,
+                "atr_sl_multiplier": 1.0, "atr_tp_multiplier": 2.5},
+        "NEUTRAL": {"k": 0.5, "take_profit": 4.0, "stop_loss": -2.0},
     }
 
     def test_atr_multipliers_loaded_from_profile(self, strategy):
         """HOT 프로필에서 ATR 멀티플라이어 로드."""
         strategy.apply_temperature({"level": "HOT"}, self.PROFILES_WITH_ATR)
-        assert strategy.atr_sl_multiplier == pytest.approx(2.0)
-        assert strategy.atr_tp_multiplier == pytest.approx(3.5)
+        assert strategy.atr_sl_multiplier == pytest.approx(1.0)
+        assert strategy.atr_tp_multiplier == pytest.approx(2.5)
 
     def test_atr_multipliers_keep_defaults_when_absent(self, strategy):
         """프로필에 ATR 멀티플라이어 없으면 기본값 유지."""
         strategy.apply_temperature({"level": "NEUTRAL"}, self.PROFILES_WITH_ATR)
-        assert strategy.atr_sl_multiplier == pytest.approx(2.5)  # default
-        assert strategy.atr_tp_multiplier == pytest.approx(3.0)  # default
+        assert strategy.atr_sl_multiplier == pytest.approx(1.0)   # default
+        assert strategy.atr_tp_multiplier == pytest.approx(2.0)   # default

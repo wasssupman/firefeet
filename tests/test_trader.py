@@ -191,14 +191,20 @@ class TestProcessStockSell:
             "qty": qty, "orderable_qty": qty,
             "buy_price": buy_price,
         }])
+        # ATR 기반 TP/SL이 buy_price와 일관되도록 OHLC 설정
+        # high-low = 1500 → ATR ≈ 1500 → SL=-1.5%, TP=+3.0% (fixed % floor가 적용됨)
+        manager.set_ohlc(code, make_ohlc_dataframe(
+            base_open=buy_price, base_high=buy_price + 1000,
+            base_low=buy_price - 500, base_close=buy_price + 500,
+        ))
 
     def test_sell_take_profit(self, tmp_path):
         """TP 도달 → SELL_TAKE_PROFIT 주문 + portfolio에서 제거."""
         trader, manager, discord = make_trader(tmp_path)
         code = "005930"
         self._setup_held_position(trader, manager, code, buy_price=100_000, qty=5)
-        # profit = +3.5% → triggers take_profit (default 3.0%)
-        manager.set_current_price(code, price=103_500)
+        # profit = +4.5% → triggers take_profit (default 4.0%)
+        manager.set_current_price(code, price=104_500)
 
         trader.process_stock(code, "1200")
 
@@ -239,7 +245,7 @@ class TestProcessStockSell:
         code = "005930"
         trader.consecutive_sl_count = 2
         self._setup_held_position(trader, manager, code, buy_price=100_000, qty=5)
-        manager.set_current_price(code, price=103_500)
+        manager.set_current_price(code, price=104_500)
 
         trader.process_stock(code, "1200")
 
@@ -275,6 +281,11 @@ class TestConsecutiveSLBrake:
             "qty": qty, "orderable_qty": qty,
             "buy_price": buy_price,
         }])
+        # ATR 기반 TP/SL이 buy_price와 일관되도록 OHLC 설정
+        manager.set_ohlc(code, make_ohlc_dataframe(
+            base_open=buy_price, base_high=buy_price + 1000,
+            base_low=buy_price - 500, base_close=buy_price + 500,
+        ))
 
     def test_sl_brake_set_after_max_consecutive(self, tmp_path):
         """연속 SL max_consecutive회 도달 시 sl_brake_until 설정."""
