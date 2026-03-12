@@ -264,7 +264,6 @@ def main():
                 f"일일 손익: {status['daily_pnl']:+,}원 | 거래: {status['trade_count']}건"
             )
 
-        _release_lock()
 
 
 def _dry_run_cycle(engine):
