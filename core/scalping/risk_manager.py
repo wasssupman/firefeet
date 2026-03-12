@@ -213,21 +213,15 @@ class RiskManager:
     # ── Position Risk ──────────────────────────
 
     def check_position_risk(self, buy_price, current_price, qty):
-        """포지션 리스크 체크 — 건당 최대 손실 초과 시 강제 청산 신호"""
+        """포지션 리스크 체크 — 비율 기반. 포지션 크기와 무관하게 일관 작동."""
         per_trade = self.rules.get("per_trade", {})
 
-        # 금액 기준 손실 체크
-        unrealized_pnl = (current_price - buy_price) * qty
-        max_loss_amount = per_trade.get("max_loss_amount", 5000)
-        if unrealized_pnl <= -max_loss_amount:
-            return True, f"건당 손실한도({unrealized_pnl:+,}원 / -{max_loss_amount:,}원)"
-
-        # 비율 기준 손실 체크
         if buy_price > 0:
             loss_pct = (current_price - buy_price) / buy_price * 100
-            max_loss_pct = per_trade.get("max_loss_pct", 0.3)
+            max_loss_pct = per_trade.get("max_loss_pct", 0.7)
             if loss_pct <= -max_loss_pct:
-                return True, f"건당 손실률({loss_pct:+.2f}% / -{max_loss_pct}%)"
+                unrealized_pnl = (current_price - buy_price) * qty
+                return True, f"건당 손실률({loss_pct:+.2f}% / {unrealized_pnl:+,.0f}원)"
 
         return False, ""
 

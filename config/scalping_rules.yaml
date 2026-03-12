@@ -4,8 +4,7 @@
 mode:
   real:
     per_trade:
-      max_loss_amount: 5000           # 건당 최대 손실 (KRW)
-      max_loss_pct: 0.5               # 건당 최대 손실률 (%)
+      max_loss_pct: 0.5               # 건당 최대 손실률 (%) — 포지션 크기 무관 비율 기반
       max_position_value: 200000      # 건당 최대 포지션 (KRW)
     daily_limits:
       max_daily_loss: 30000           # 일일 최대 손실 (KRW)
@@ -23,8 +22,7 @@ mode:
 
   paper:
     per_trade:
-      max_loss_amount: 10000          # 건당 1만원 (기존 2만 → 1만, RISK 손실 축소)
-      max_loss_pct: 0.7               # 건당 최대 손실률 (기존 1.0% → 0.7%, SL과 근접)
+      max_loss_pct: 0.7               # 건당 최대 손실률 (%) — 포지션 크기 무관 비율 기반
       max_position_value: 2000000     # 건당 최대 포지션 (KRW)
     daily_limits:
       max_daily_loss: 200000          # 일일 20만원
@@ -37,8 +35,8 @@ mode:
       max_entries_per_stock: 3        # 종목별 최대 진입 횟수
     time_restrictions:
       no_entry_before: "0900"         # 장 시작부터 진입 가능
-      no_entry_after: "1525"          # 15:25까지 진입 가능
-      force_exit_by: "1528"           # 15:28 전체 청산
+      no_entry_after: "1505"          # 15:05까지 진입 가능
+      force_exit_by: "1510"           # 15:10 전체 청산
 
 # 온도별 오버라이드 (공통)
 temperature_overrides:

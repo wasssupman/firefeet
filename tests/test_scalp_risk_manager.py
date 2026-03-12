@@ -120,9 +120,9 @@ class TestCanEnter:
             assert rm.should_force_exit() is True
 
     def test_no_force_exit_before_time(self, rm):
-        """15:20 -> should_force_exit()=False."""
+        """15:05 -> should_force_exit()=False (force_exit_by=1510)."""
         with patch("core.scalping.risk_manager.datetime") as mock_dt:
-            mock_dt.datetime.now.return_value = _make_kst_datetime(15, 20)
+            mock_dt.datetime.now.return_value = _make_kst_datetime(15, 5)
             mock_dt.timezone = datetime.timezone
             mock_dt.timedelta = datetime.timedelta
 
