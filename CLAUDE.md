@@ -46,6 +46,7 @@ python3 run_export.py macro|watchlist|all  # CLI 리포트
 - **시간**: KST 기준, `"%H%M"` 포맷 (예: `"1520"`)
 - **에러 처리**: 모듈별 try/except로 독립 실행. 하나 실패해도 나머지 계속 동작
 - **설정 변경**: YAML 파일만 수정하면 런타임에 반영 (trader는 매 루프 reload)
+- **세션 핸드오프**: 봇 코드 수정 세션 종료 시, MEMORY.md의 해당 봇 섹션을 업데이트할 것. 이전 세션 결정을 뒤집는 변경은 데이터 근거 없이 금지.
 
 ## 테스트
 
@@ -69,10 +70,19 @@ pytest tests/test_web_api.py -v                     # 웹 API (17 cases)
 - `/agents/param-tune` — 전략 파라미터 튜닝 (데이터 기반 제안, 3중 충돌 방지)
 - `/agents/market-brief` — 장전 시황 브리핑 (온도 + 매크로 + 전략 프로필)
 - `/agents/incident` — 이상 거래 원인 추적 (파이프라인 타임라인 재구성)
+- `/agents/scalping-analyzer` — 스캘핑 로그 분석 (tick-level, regime 분포, 시그널 적중률)
+- `/agents/scalping-strategist` — 스캘핑 전략 튜닝 (VWAP Reversion 파라미터, 3중 충돌 검증)
+- `/agents/swing-analyzer` — 스윙 거래 로그 분석 (보유기간, 스크리너 정확도)
+- `/agents/swing-strategist` — 스윙 전략 분석 (ATR, 온도 프로필)
+- `/agents/volatility-analyzer` — 변동성 돌파 로그 분석 (k값별 성공률, EOD 타이밍)
+- `/agents/volatility-strategist` — 변동성 돌파 전략 분석 (k값, 리스크 한도)
 
 스킬 (`.claude/skills/` — 스크립트 기반 정형 작업):
 - `trade-review` — 거래 성과 분석 (`scripts/analyze_trades.py`)
 - `config-check` — 설정 정합성 검증 (`scripts/validate_config.py`)
+- `scalping-context` / `swing-context` / `volatility-context` — 봇별 세션 컨텍스트 로딩
+- `scalping-review` / `swing-review` / `volatility-review` — 봇별 거래 리뷰
+- `scalping-strategy` / `swing-strategy` / `volatility-strategy` — 봇별 전략 분석
 
 ## 알려진 이슈
 

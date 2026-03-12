@@ -39,11 +39,14 @@ MarketTemperature (30분 주기 장중 재계산)
 ScalpEngine._eval_cycle() [1.5초 루프]
   ├─ 시장 패닉 가드 (30초 주기, 타겟 전종목 평균 하락률 감시)
   ├─ 불변식 검증 (포지션/예산 한도)
-  ├─ EOD 강제 청산 (15:28 PAPER / 15:20 REAL)
+  ├─ EOD 강제 청산 (15:10 PAPER / 15:20 REAL)
   ├─ 서킷브레이커 확인
   ├─ 미체결 주문 관리 (15초 타임아웃)
   ├─ 보유 종목별: _eval_exit() + MAE/MFE 추적
   └─ 타겟 종목별: _eval_entry()
+       ├─ ATR 변동성 게이트 (< 0.3% 차단, ATR=0 통과)
+       ├─ RegimeDetector → momentum | reversion | no_trade
+       └─ 레짐별 시그널 세트 + 프로필 오버라이드
 ```
 
 ## 파일 구조
@@ -108,10 +111,13 @@ tests/
 2. 쿨다운 확인: 주문 쿨다운(30초) + 매도 쿨다운(10분)
 3. 데이터 충분성: TickBuffer에 30틱 이상
 4. 전략 선택: StrategySelector.select(시간, 온도) → StrategyProfile
-   - None이면 진입 차단 (점심시간 12:00~15:20)
-5. VWAP 필터: vwap_dist > -0.8% → 즉시 리턴
-6. 변동성 게이트: ATR < 0.3% → 즉시 리턴
-7. 시그널 계산: ScalpStrategy.evaluate()
+   - None이면 진입 차단 (점심시간 12:00~13:30)
+5. 변동성 게이트: ATR < 0.3% → 즉시 리턴 (ATR=0/None은 통과)
+6. 레짐 감지: RegimeDetector.detect()
+   - momentum: vwap > +0.3% + 4조건 AND → momentum 프로필
+   - reversion: vwap < -0.8% → reversion 프로필
+   - no_trade: 둘 다 아님 → 즉시 리턴
+7. 시그널 계산: ScalpStrategy.evaluate(regime=...)
    - 이벤트 트리거 (3조건 AND) → confidence
    - 페널티 검사: spread_penalty × volume_penalty < 0.5 → 거부
    - confidence ≥ threshold → 진입 허용
@@ -208,7 +214,7 @@ tick_rate_zscore     — 정규화 틱 강도
 rolling_vwap_dist    — 60분 Rolling VWAP 이격도
 momentum_velocity    — 반전 속도 (mom_short - mom_long)
 atr_pct              — ATR %
-regime               — 'reversion' | 'no_trade'
+regime               — 'reversion' | 'momentum' | 'no_trade'
 entry_trigger        — 3조건 충족 상태 (all_met/vwap/heat/reversal)
 mae                  — Max Adverse Excursion (%)
 mfe                  — Max Favorable Excursion (%)
@@ -224,8 +230,8 @@ time_to_peak         — MFE 도달 시간 (초)
 | 일일 최대 손실 | 200,000원 | 30,000원 |
 | 일일 거래 횟수 | 20건 | 50건 |
 | 서킷브레이커 | 5연패 → 300초 쿨다운 | 5연패 → 600초 쿨다운 |
-| 진입 금지 시간 | ~09:00, 15:25~ | ~09:05, 15:10~ |
-| 강제 청산 시간 | 15:28 | 15:20 |
+| 진입 금지 시간 | ~09:00, 15:05~ | ~09:05, 15:10~ |
+| 강제 청산 시간 | 15:10 | 15:20 |
 
 ## 시장 패닉 가드
 
@@ -258,7 +264,7 @@ time_to_peak         — MFE 도달 시간 (초)
 
 **하나라도 No-Go → 전략 폐기 또는 근본 재설계.**
 
-Go 판정 시 → Phase 4 (RegimeDetector: reversion/no_trade 2분류) 진행.
+Phase 4 완료 — RegimeDetector (momentum/reversion/no_trade 3분류) 구현 완료.
 
 ## 수수료 분석
 
@@ -283,6 +289,20 @@ Go 판정 시 → Phase 4 (RegimeDetector: reversion/no_trade 2분류) 진행.
 
 ## 변경 이력
 
+### 2026-03-11: Dual-Regime + 오후장 활성화 + 버그 수정
+
+| 항목 | Before | After |
+|------|--------|-------|
+| 레짐 분류 | reversion/no_trade 2분류 | momentum/reversion/no_trade 3분류 (RegimeDetector) |
+| 모멘텀 진입 | 없음 | vwap>+0.3% + mom>0 + tick_ratio>0.3 + vol_accel>1.5 |
+| 점심 차단 | 12:00-15:20 | 12:00-13:30 |
+| 오후장 | 비활성 | 13:30-15:10 활성 |
+| 강제 청산 (PAPER) | 15:28 | 15:10 |
+| 진입 차단 (PAPER) | 15:25 | 15:05 |
+| tick_direction 파싱 | fields[15] (매도체결건수 — 버그) | fields[21] (체결구분) |
+| ATR 게이트 | ATR=0 차단 (데이터 부족도 차단) | ATR=0/None 통과 (실제 저변동성만 차단) |
+| DummyManager order_no | 100001부터 고정 (세션 충돌) | 타임스탬프 기반 유니크 |
+
 ### 2026-03-10: VWAP Deviation Reversion 전환
 
 | 항목 | Before | After |
@@ -294,8 +314,8 @@ Go 판정 시 → Phase 4 (RegimeDetector: reversion/no_trade 2분류) 진행.
 | max_hold | 180초 | 120초 |
 | tick_buffer | 600틱 | 3000틱 + rolling VWAP + tick rate z-score |
 | conf threshold | 0.40 | 0.45 |
-| 전략 프로필 | orb + momentum_scalp + vwap_reversion | vwap_reversion 단일 |
-| 활성 시간 | 09:00-12:00 (3개 프로필) | 09:30-12:00 (VWAP 안정 후) |
+| 전략 프로필 | orb + momentum_scalp + vwap_reversion | vwap_reversion + momentum (dual-regime) |
+| 활성 시간 | 09:00-12:00 (3개 프로필) | 09:30-12:00, 13:30-15:10 (점심 제외) |
 | 변동성 게이트 | 없음 | ATR < 0.3% 차단 |
 | MAE/MFE | 없음 | 실시간 추적 + CSV 기록 |
 | CSV 컬럼 | 30개 | 39개 |
@@ -351,7 +371,7 @@ tail -f logs/scalp_trades_*.csv           # CSV 실시간
 - [x] ~~장중 온도 재계산~~ — 30분 주기 재계산 완료
 - [x] ~~이벤트 트리거 전환~~ — 5시그널 가중합산 → 3조건 AND (2026-03-10)
 - [ ] 2-3주 PAPER 데이터 수집 → Go/No-Go 판단
-- [ ] Go 시: RegimeDetector (reversion/no_trade 2분류) 구현
+- [x] ~~RegimeDetector 구현~~ — momentum/reversion/no_trade 3분류 (2026-03-11)
 - [ ] Go 시: ORB 전략 복원 검토 (09:00-09:30 VWAP 안정성 데이터 기반)
 - [ ] 수수료 우대 협상 (0.21% → 0.05% 가능 시 수익 영역 극적 확장)
 - [ ] Orderbook Pressure 스푸핑 필터
