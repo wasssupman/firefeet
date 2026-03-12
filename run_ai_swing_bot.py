@@ -277,8 +277,8 @@ def main():
             time_str = now.strftime("%H%M%S")
             now_ts = time.time()
             
-            # 장 운영시간 체크
-            if not is_paper and not is_market_hours():
+            # 장 운영시간 체크 (페이퍼 모드도 장중에만 루프)
+            if not is_market_hours():
                 print(f"[{now.strftime('%H:%M:%S')}] 장 운영시간 아님. 1분 대기...")
                 cached_temp = {"result": None, "timestamp": 0}  # 다음 장 시작 시 재계산
                 trader.reset_daily()   # 날짜 변경 시에만 리셋 (장중 재시작 안전)

@@ -32,6 +32,16 @@ class SwingTrader(FirefeetTrader):
         from core.db.position_registry import PositionRegistry
         self.position_registry = PositionRegistry()
 
+    def _effective_tp(self, atr14, avg_price):
+        """ATR 기반 실효 TP% 계산 (고정 % = floor)."""
+        if self.strategy is None:
+            return 4.0
+        base_tp = self.strategy.take_profit
+        if atr14 and atr14 > 0 and avg_price > 0:
+            atr_tp_pct = (atr14 * self.strategy.atr_tp_multiplier) / avg_price * 100
+            return max(base_tp, atr_tp_pct)
+        return base_tp
+
     def process_stock_with_ai(self, code, time_str, data_provider_fn):
         """
         AI 판단을 받아 특정 종목의 매수/매도를 처리합니다.
@@ -47,7 +57,9 @@ class SwingTrader(FirefeetTrader):
             held_qty = self.portfolio[code].get('qty', 0)
         try:
             ai_data = data_provider_fn(code)
-            current_price = ai_data.get('current_data', {}).get('price', 0)
+            if not ai_data:
+                return
+            current_price = (ai_data.get('current_data') or {}).get('price', 0)
         except Exception as e:
             self.logger.error(f"[{code}] 데이터 수집 실패: {e}")
             return
@@ -136,12 +148,7 @@ class SwingTrader(FirefeetTrader):
             }
             self.logger.info(f"[{name}({code})] 기계적 매수 결정 (스크리너: {screener_score})")
 
-        # 4. 리스크 기반 수량 계산
-        # qty = risk_amount / stop_distance (손절 시 항상 동일 금액 손실)
-        total_capital = self.settings.get("total_budget", 1000000)
-        risk_pct = self.settings.get("risk_per_trade_pct", 2.0)  # 스윙은 2% 기본
-        risk_amount = total_capital * (risk_pct / 100)
-
+        # 4. 리스크 기반 수량 계산 (공통 메서드 사용)
         # Stop distance: AI 제시 stop_loss 또는 ATR 기반
         ai_stop = float(decision.get('stop_loss', 0))
         if ai_stop > 0 and ai_stop < current_price:
@@ -155,28 +162,17 @@ class SwingTrader(FirefeetTrader):
             else:
                 hard_sl_pct = abs(self.trading_rules.get("hard_stop_loss_pct", -7.0))
                 stop_distance = current_price * hard_sl_pct / 100
-
         if stop_distance <= 0:
             stop_distance = current_price * 0.07  # fallback 7%
 
-        qty = int(risk_amount / stop_distance)
-
-        # 포지션 상한 (max_position_amount)
-        available_cash = self.manager.get_balance()['available_cash']
-        max_pos_rule = self.trading_rules.get("max_position_amount", {})
-        max_amount = available_cash
-        if max_pos_rule.get("enabled", False):
-            max_amount = min(max_amount, max_pos_rule.get("default_amount", available_cash))
-
-        buy_amount = qty * current_price
-        if buy_amount > max_amount:
-            qty = int(max_amount // current_price)
-        if qty * current_price > available_cash:
-            qty = int(available_cash // current_price)
+        available_cash = self.manager.get_balance().get('deposit', 0)
+        qty = self._size_position(current_price, stop_distance, available_cash, risk_pct_default=2.0)
 
         if qty <= 0:
             return
 
+        total_capital = self.settings.get("total_budget", 1000000)
+        risk_amount = total_capital * (self.settings.get("risk_per_trade_pct", 2.0) / 100)
         self.logger.info(
             f"[{name}] 사이징: risk={risk_amount:,.0f}원, SL거리={stop_distance:,.0f}원, "
             f"수량={qty}주, 금액={qty * current_price:,.0f}원"
@@ -214,9 +210,14 @@ class SwingTrader(FirefeetTrader):
             self.db_writer.update_status(order_no, "FILLED",
                 filled_qty=filled_qty, filled_price=filled_price)
             self.position_registry.register(code, "swing", filled_qty, filled_price)
-            # 보유기간 추적용 타임스탬프 기록
-            if code in self.portfolio:
-                self.portfolio[code]['buy_timestamp'] = time.time()
+            # 즉시 portfolio에 기록 (다음 루프 중복 매수 방지)
+            self.portfolio[code] = {
+                "qty": filled_qty,
+                "orderable_qty": 0,
+                "buy_price": filled_price,
+                "buy_timestamp": time.time(),
+                "unconfirmed": True,
+            }
             if self.discord:
                 self.discord.send(
                     f"🟢 **[AI 스윙 매수] {name} ({code})**\n"
@@ -261,10 +262,7 @@ class SwingTrader(FirefeetTrader):
 
         # 1-1. ATR 기반 기계적 익절 게이트 (AI 호출 전 온도 연동)
         if self.strategy is not None:
-            effective_tp = self.strategy.take_profit
-            if atr14 and atr14 > 0 and avg_price > 0:
-                atr_tp_pct = (atr14 * self.strategy.atr_tp_multiplier) / avg_price * 100
-                effective_tp = max(self.strategy.take_profit, atr_tp_pct)  # 고정 % = floor
+            effective_tp = self._effective_tp(atr14, avg_price)
             if profit_rate >= effective_tp:
                 tp_info = f"수익률: {profit_rate:.2f}% (목표: {effective_tp:.1f}%)"
                 self.logger.info(f"[{name}] 기계적 익절 도달 ({profit_rate:.2f}%). 전량 매도합니다.")
@@ -276,10 +274,7 @@ class SwingTrader(FirefeetTrader):
         time_hhmm = time_str[:4]
         if "0900" <= time_hhmm <= "0930":
             if self.strategy is not None:
-                base_tp = self.strategy.take_profit
-                if atr14 and atr14 > 0 and avg_price > 0:
-                    atr_tp_pct = (atr14 * self.strategy.atr_tp_multiplier) / avg_price * 100
-                    base_tp = max(self.strategy.take_profit, atr_tp_pct)
+                base_tp = self._effective_tp(atr14, avg_price)
                 opening_tp = base_tp * 0.6  # 장 시작 할인: 정규 TP의 60%
                 if profit_rate >= opening_tp:
                     tp_info = f"장 시작 익절: {profit_rate:.2f}% (조기목표: {opening_tp:.1f}%, 정규: {base_tp:.1f}%)"

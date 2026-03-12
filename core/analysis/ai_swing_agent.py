@@ -63,7 +63,8 @@ class AISwingAgent:
             return fallback
 
         memo = ""
-        
+        analyst_failed = False
+
         # --- Phase 1: Analyst ---
         try:
             self.logger.info(f"[{name}({code})] Phase 1: Analyst evaluating data...")
@@ -74,6 +75,7 @@ class AISwingAgent:
             if self.fallback_allowed:
                 self.logger.warning(f"[{name}({code})] Falling back to Executor-only logic (Degraded Mode).")
                 memo = "ANALYST FAILED. You must operate based purely on the hard facts provided and output a safe HOLD JSON decision if unsure."
+                analyst_failed = True
             else:
                 return self._safe_fallback_json()
 
@@ -92,7 +94,16 @@ class AISwingAgent:
 
              # Python-level sanity check
              decision_json = self._sanity_check(decision_json, hard_facts, code, name)
-             
+
+             # Degraded Mode 안전장치: Analyst 실패 시 BUY 차단
+             if analyst_failed and decision_json.get('decision') == 'BUY':
+                 self.logger.warning(f"[{name}({code})] Analyst 실패 상태에서 BUY 차단 — WAIT로 변경")
+                 decision_json['decision'] = 'WAIT'
+                 decision_json['reasoning'] = (
+                     f"[Degraded Mode] Analyst 실패 상태에서 매수 차단. "
+                     f"원래 사유: {decision_json.get('reasoning', '')[:200]}"
+                 )
+
              # --- Phase 3: Vision AI Cross-Validation (only if BUY) ---
              if decision_json.get("decision") == "BUY":
                  self.logger.info(f"[{name}({code})] Phase 3: Vision AI chart cross-validation started...")
