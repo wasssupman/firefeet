@@ -52,6 +52,8 @@ class PortfolioManager:
             if code in whitelist_set:
                 skipped.append(f"{stock.get('name', code)}({code})")
                 continue
+            if stock['qty'] <= 0:
+                continue
             entry = {
                 "qty": stock['qty'],
                 "orderable_qty": stock.get('orderable_qty', stock['qty']),
