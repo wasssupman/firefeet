@@ -16,10 +16,18 @@ class KISManager:
         self.acnt_prdt_cd = account_info["ACNT_PRDT_CD"]
         self.mode = mode
         self.url_base = auth.url_base
+        # 토큰 갱신 서킷 브레이커: 실패 시 60초간 API 호출 차단
+        self._token_circuit_open_until = 0
 
     def _request(self, method, url, tr_id, hashkey=None, **kwargs):
         """API 요청 + 401/토큰만료 시 갱신 후 1회 재시도, 속도제한 시 대기"""
         import time as _time
+
+        # 서킷 브레이커: 토큰 갱신 실패 쿨다운 중이면 즉시 차단
+        if _time.time() < self._token_circuit_open_until:
+            remaining = int(self._token_circuit_open_until - _time.time())
+            raise ConnectionError(f"토큰 갱신 대기 중 ({remaining}초 남음)")
+
         headers = self.auth.get_headers(tr_id=tr_id)
         if hashkey:
             headers["hashkey"] = hashkey
@@ -36,12 +44,25 @@ class KISManager:
                 # 토큰 만료 — 갱신 후 재시도
                 print(f"[KISManager] 토큰 만료 — 갱신 후 재시도")
                 self.auth.invalidate_token()
-                headers = self.auth.get_headers(tr_id=tr_id)
+                try:
+                    headers = self.auth.get_headers(tr_id=tr_id)
+                except Exception:
+                    self._token_circuit_open_until = _time.time() + 65
+                    raise ConnectionError("토큰 갱신 실패 — 65초 서킷 브레이커 활성화")
                 if hashkey:
                     headers["hashkey"] = hashkey
                 res = requests.request(method, url, headers=headers, **kwargs)
+                # 갱신 후에도 403이면 서킷 브레이커
+                if res.status_code == 403 and "EGW00133" in res.text[:300]:
+                    self._token_circuit_open_until = _time.time() + 65
+                    raise ConnectionError("토큰 발급 제한 (1분당 1회) — 65초 서킷 브레이커 활성화")
             else:
                 print(f"[KISManager] 500 응답: {body}")
+
+        # 403 토큰 발급 제한 (tokenP 엔드포인트 직접 실패)
+        if res.status_code == 403 and "EGW00133" in res.text[:300]:
+            self._token_circuit_open_until = _time.time() + 65
+            raise ConnectionError("토큰 발급 제한 (1분당 1회) — 65초 서킷 브레이커 활성화")
 
         if res.status_code == 401:
             print(f"[KISManager] 401 — 토큰 갱신 후 재시도")
@@ -430,7 +451,8 @@ class DummyManager(KISManager):
     """
     def __init__(self, auth, account_info, mode="PAPER"):
         super().__init__(auth, account_info, mode)
-        self._virtual_odno = 100000
+        # 세션 간 충돌 방지: 타임스탬프 기반 주문번호
+        self._virtual_odno = int(time.time() * 1000) % 10_000_000_000
         self._dummy_orders = {}
 
     def place_order(self, code, qty, price, order_type):
