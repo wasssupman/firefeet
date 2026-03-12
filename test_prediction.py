@@ -1,11 +1,14 @@
-import asyncio
 from core.news_analyzer import NewsAnalyzer
-from core.analysis.llms.claude_analyst import ClaudeAnalyst
+from core.analysis.llms.claude_cli import call_claude
 
-async def predict():
+def predict():
     try:
         analyzer = NewsAnalyzer()
         news = analyzer.fetch_global_news_titles(limit=15)
+        if not news:
+            print("[predict] 뉴스 수집 실패 — 예측 불가")
+            return
+
         news_text = "\n".join([f"- {n}" for n in news])
 
         prompt = f"""당신은 여의도의 탑티어 시황 분석가입니다.
@@ -20,10 +23,12 @@ async def predict():
 3. 내일 장중 주목해야 할 핵심 테마나 주요 섹터 (예: 반도체, 금융 등)
 4. 종합 투자 의견 및 전략 (Risk-On / Risk-Off)
 """
-        llm = ClaudeAnalyst()
-        res = llm.analyze("000000", "시황예측", {"current_data": {}, "news": news[:5]})
-        print(res)
+        print("Claude CLI 시황 분석 중...\n")
+        result = call_claude(prompt, timeout=180)
+        print(result)
+
     except Exception as e:
         print(f"Error: {e}")
 
-asyncio.run(predict())
+if __name__ == "__main__":
+    predict()

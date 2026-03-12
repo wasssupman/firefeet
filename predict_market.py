@@ -1,15 +1,14 @@
-import os
-import asyncio
-from dotenv import load_dotenv
 from core.news_analyzer import NewsAnalyzer
-from core.config_loader import ConfigLoader
+from core.analysis.llms.claude_cli import call_claude
 
-load_dotenv()
-
-async def main():
+def main():
     try:
         analyzer = NewsAnalyzer()
         news = analyzer.fetch_global_news_titles(limit=15)
+        if not news:
+            print("[predict] 뉴스 수집 실패 — 예측 불가")
+            return
+
         news_text = "\n".join([f"- {n}" for n in news])
 
         prompt = f"""당신은 여의도의 탑티어 시황 분석가입니다.
@@ -24,30 +23,12 @@ async def main():
 3. 내일 장중 주목해야 할 핵심 테마나 주요 섹터 (예: 반도체, 금융 등)
 4. 종합 투자 의견 및 전략 (Risk-On / Risk-Off)
 """
-        loader = ConfigLoader()
-        secrets = loader.load_config()
-        api_key = secrets.get("ANTHROPIC_API_KEY", os.environ.get("ANTHROPIC_API_KEY", ""))
-        if not api_key:
-            print("No ANTHROPIC_API_KEY found.")
-            return
-
-        import anthropic
-        if api_key.startswith("sk-ant-oat"):
-            client = anthropic.Anthropic(auth_token=api_key)
-        else:
-            client = anthropic.Anthropic(api_key=api_key)
-
-        print("Claude 시황 분석 중...\n")
-        response = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=2048,
-            temperature=0.1,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        print(response.content[0].text)
+        print("Claude CLI 시황 분석 중...\n")
+        result = call_claude(prompt, timeout=180)
+        print(result)
 
     except Exception as e:
         print(f"Error: {e}")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

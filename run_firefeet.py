@@ -47,7 +47,7 @@ def main():
     print(f"Mode: {mode}")
     
     config = loader.get_kis_config(mode=mode)
-    account_info = loader.get_account_info()
+    account_info = loader.get_account_info(mode=mode)
     
     auth = KISAuth(config)
     manager = KISManager(auth, account_info, mode=mode)
