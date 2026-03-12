@@ -7,6 +7,12 @@ import websocket  # websocket-client library
 class KISWebSocket:
     """KIS 실시간 WebSocket 클라이언트 (체결가 + 호가 + 체결통보)"""
 
+    # Field index constants (H0STCNT0 체결가 데이터)
+    FIELD_TICK_DIRECTION = 21  # 체결구분 (1:매수, 5:매도)
+    FIELD_SELL_COUNT = 15      # 매도체결건수 (체결구분 아님!)
+    FIELD_BUY_COUNT = 16       # 매수체결건수
+    FIELD_STRENGTH = 18        # 체결강도
+
     # WebSocket endpoints
     WS_URL_REAL = "ws://ops.koreainvestment.com:21000"
     WS_URL_PAPER = "ws://ops.koreainvestment.com:31000"
@@ -290,7 +296,10 @@ class KISWebSocket:
             "volume": int(fields[12]),     # 체결량
             "acml_volume": int(fields[13]),  # 누적거래량
             "acml_amount": int(fields[14]),  # 누적거래대금
-            "tick_direction": fields[15],   # 체결구분 (1:매수, 5:매도 등)
+            "sell_count": int(fields[15]),   # 매도체결건수
+            "buy_count": int(fields[16]),    # 매수체결건수
+            "strength": float(fields[18]) if fields[18] else 0,  # 체결강도
+            "tick_direction": fields[21],    # 체결구분 (1:매수, 5:매도)
         }
 
         for cb in self._callbacks.get(self.TR_TICK, []):
