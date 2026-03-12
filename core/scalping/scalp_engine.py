@@ -16,6 +16,7 @@ from core.scalping.scalp_strategy import ScalpStrategy
 from core.scalping.risk_manager import RiskManager
 from core.scalping.scalp_screener import ScalpScreener
 from core.scalping.strategy_selector import StrategySelector
+from core.scalping.regime_detector import RegimeDetector
 from core.technical.candle_history import CandleHistory, Candle
 from core.technical.analyzer import IntradayAnalyzer
 from core.db.writer import BackgroundWriter
@@ -60,6 +61,7 @@ class ScalpEngine:
         self.signals = ScalpSignals(settings_path)
         self.strategy = ScalpStrategy(self.signals, settings_path)
         self.strategy_selector = StrategySelector("config/scalping_strategies.yaml")
+        self.regime_detector = RegimeDetector()
         self.risk_manager = RiskManager(settings_path, mode=mode)
         self.screener = ScalpScreener(manager, settings_path)
 
@@ -465,28 +467,37 @@ class ScalpEngine:
             # print(f"  [DEBUG] {code} 틱 부족 ({len(self.tick_buffer.get_ticks(code))} / 30)")
             return
 
-        # 전략 선택 (점심 구간이면 None → 진입 차단)
+        # 전략 선택 (시간/점심 게이트)
         profile = self.strategy_selector.select()
         if profile is None:
             return
 
-        # VWAP reversion 전략: VWAP -0.8% 이상 이탈 종목만 평가
-        if profile.name == "vwap_reversion":
-            vwap_dist = self.tick_buffer.get_vwap_distance(code)
-            if vwap_dist > -0.8:
-                return
+        # 변동성 게이트: ATR < 0.3%이면 진입 불가 (ATR=0/None은 데이터 부족 → 통과)
+        ta_overlay = self.ta_analyzer.analyze(code)
+        atr_pct = ta_overlay.atr_pct if ta_overlay else None
+        if atr_pct is not None and atr_pct > 0 and atr_pct < 0.3:
+            if not hasattr(self, '_atr_diag_time') or time.time() - self._atr_diag_time > 30:
+                self._atr_diag_time = time.time()
+                name = self.stock_names.get(code, code)
+                print(f"  [ATR_GATE] {name}({code}) ATR={atr_pct:.3f}% < 0.3% → 차단")
+            return
 
-        # 적응형 풀 스킵 체크 (Phase 3.2): 50사이클 연속 composite < 15이면 건너뜀
+        # 레짐 감지 → 전략 프로필 오버라이드
+        regime = self.regime_detector.detect(code, self.tick_buffer, diag=True)
+        if regime == "no_trade":
+            return
+
+        # 레짐에 맞는 프로필 선택
+        regime_profile = self.strategy_selector.get_profile_by_name(regime)
+        if regime_profile:
+            profile = regime_profile
+
+        # 적응형 풀 스킵 체크 (50사이클 연속 composite < 15이면 건너뜀)
         if self._low_composite_cycles.get(code, 0) >= 50:
             return
 
-        # 변동성 게이트: ATR < 0.3%이면 진입 불가
-        ta_overlay = self.ta_analyzer.analyze(code)
-        if ta_overlay and ta_overlay.atr_pct < 0.3:
-            return
-
-        # 전략 평가
-        result = self.strategy.evaluate(code, self.tick_buffer, self.orderbook_analyzer, profile=profile, ta_overlay=ta_overlay)
+        # 전략 평가 (regime 전달)
+        result = self.strategy.evaluate(code, self.tick_buffer, self.orderbook_analyzer, profile=profile, ta_overlay=ta_overlay, regime=regime)
 
         # composite 기록 — adaptive pool rotation 카운터 관리
         if result["composite"] < 15:
@@ -499,12 +510,12 @@ class ScalpEngine:
         veto = penalties.get("combined", 1) < 0.5
         if result["composite"] >= 15:
             sigs = result.get("signals", {})
-            print(f"  [{profile.name.upper()}] {name}({code}) "
+            sig_parts = " ".join(f"{k[:3].upper()}:{v:.0f}" for k, v in sigs.items())
+            print(f"  [{regime.upper()}:{profile.name.upper()}] {name}({code}) "
                   f"comp={result['composite']:.0f} conf={result['confidence']:.3f} "
                   f"thr={result['threshold']:.2f} {'VETO' if veto else ''} "
                   f"enter={'✅' if result['should_enter'] else '❌'} "
-                  f"| V:{sigs.get('vwap_reversion',0):.0f} "
-                  f"O:{sigs.get('orderbook_pressure',0):.0f}")
+                  f"| {sig_parts}")
         if not result["should_enter"]:
             return
 
@@ -585,8 +596,8 @@ class ScalpEngine:
                 "rolling_vwap_dist": round(self.tick_buffer.get_rolling_vwap_distance(code), 4),
                 "momentum_velocity": round(self.tick_buffer.get_momentum_reversal(code)[1], 4),
                 "atr_pct": round(ta_overlay.atr_pct, 4) if ta_overlay else "",
-                "regime": "reversion" if result["should_enter"] else "no_trade",
-                "entry_trigger": self._get_entry_trigger(code),
+                "regime": regime,
+                "entry_trigger": self._get_entry_trigger(code, regime=regime),
             }
             self.pending_orders[order_no] = {
                 "code": code,
@@ -621,8 +632,24 @@ class ScalpEngine:
             print(f"[ScalpEngine] 📋 매수 주문 접수: {name}({code}) {qty}주 @ {order_price:,}원 "
                   f"(주문번호={order_no}, conf={result['confidence']:.3f}, strategy={profile.name})")
 
-    def _get_entry_trigger(self, code):
-        """3조건 중 마지막으로 충족된 조건 식별 (로깅용)"""
+    def _get_entry_trigger(self, code, regime="reversion"):
+        """레짐별 진입 트리거 식별 (로깅용)"""
+        if regime == "momentum":
+            momentums = self.tick_buffer.get_momentums(code)
+            conditions = []
+            if self.tick_buffer.get_vwap_distance(code) > 0.3:
+                conditions.append("vwap_above")
+            if momentums.get("10s", 0) > 0 and momentums.get("60s", 0) > 0:
+                conditions.append("mom")
+            if self.tick_buffer.get_tick_direction_ratio(code, n=30) > 0.3:
+                conditions.append("tick_dir")
+            if self.tick_buffer.get_volume_acceleration(code) > 1.5:
+                conditions.append("vol_accel")
+            if len(conditions) == 4:
+                return "all_met"
+            return ",".join(conditions) if conditions else "none"
+
+        # reversion
         vwap_dist = self.tick_buffer.get_vwap_distance(code)
         tick_rate_z = self.tick_buffer.get_tick_rate_zscore(code)
         vol_accel = self.tick_buffer.get_volume_acceleration(code)

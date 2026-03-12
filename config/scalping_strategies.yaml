@@ -1,10 +1,11 @@
 lunch_block_start: "1200"
-lunch_block_end:   "1520"              # 12시 이후 오후장 전체 차단
+lunch_block_end:   "1330"              # 점심시간 단축: 12:00-13:30 (슬리피지 방지)
 
 strategies:
   - name: vwap_reversion
     active_times:
-      - {start: "0930", end: "1200"}   # 09:00-09:30 제외 (VWAP 불안정)
+      - {start: "0930", end: "1200"}   # 오전: 거래량 최적 구간
+      - {start: "1330", end: "1510"}   # 오후: 기관 추세 및 VWAP 수렴 구간 (추천)
     temperatures: any                   # 변동성 게이트가 대체
     signal_weights:
       vwap_reversion: 80               # 핵심 이벤트 트리거
@@ -13,6 +14,20 @@ strategies:
     take_profit: 0.6                    # TP +0.6%
     stop_loss: -0.4                     # SL -0.4%
     max_hold_seconds: 120               # 2분 (reversion edge ~60-90초)
+
+  - name: momentum
+    active_times:
+      - {start: "0930", end: "1200"}
+      - {start: "1330", end: "1510"}
+    temperatures: any
+    signal_weights:
+      momentum_burst: 50
+      micro_trend: 30
+      orderbook_pressure: 20
+    confidence_threshold: 0.50
+    take_profit: 1.0
+    stop_loss: -0.4
+    max_hold_seconds: 180
 
 adaptive:
   name: adaptive

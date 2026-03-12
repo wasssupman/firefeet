@@ -70,6 +70,28 @@ class StrategySelector:
         self._last_strategy_name = "adaptive"
         return self._default_profile()
 
+    def get_profile_by_name(self, name):
+        """이름으로 전략 프로필 조회 (레짐 기반 선택용)"""
+        cfg = self._load_config()
+        for s in cfg.get("strategies", []):
+            if s.get("name") == name:
+                return self._build_profile(s)
+        # fallback: momentum은 기본 프로필 생성
+        if name == "momentum":
+            return self._momentum_default_profile()
+        return None
+
+    def _momentum_default_profile(self):
+        """모멘텀 기본 프로필"""
+        return StrategyProfile(
+            name="momentum",
+            weights={"momentum_burst": 50, "micro_trend": 30, "orderbook_pressure": 20},
+            confidence_threshold=0.50,
+            take_profit=1.0,
+            stop_loss=-0.4,
+            max_hold_seconds=180,
+        )
+
     # ── Private helpers ───────────────────────────────────────
 
     def _load_config(self) -> dict:

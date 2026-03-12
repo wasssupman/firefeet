@@ -31,7 +31,7 @@ class ScalpStrategy:
             print(f"[ScalpStrategy] Settings load failed: {e}")
         return {}
 
-    def evaluate(self, code, tick_buffer, orderbook_analyzer, profile=None, ta_overlay=None):
+    def evaluate(self, code, tick_buffer, orderbook_analyzer, profile=None, ta_overlay=None, regime="reversion"):
         """
         종합 평가 → 진입 신호.
         profile이 주어지면 profile의 가중치/임계값/TP/SL 사용.
@@ -47,7 +47,7 @@ class ScalpStrategy:
         }
         """
         # 1. 개별 시그널 계산
-        signals = self.signals.calculate_all(code, tick_buffer, orderbook_analyzer)
+        signals = self.signals.calculate_all(code, tick_buffer, orderbook_analyzer, regime=regime)
 
         # 2. 가중 합산 (profile 가중치 우선)
         weights = profile.weights if profile else None

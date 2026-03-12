@@ -20,16 +20,24 @@ class ScalpSignals:
             print(f"[ScalpSignals] Settings load failed: {e}")
         return {}
 
-    def calculate_all(self, code, tick_buffer, orderbook_analyzer):
+    def calculate_all(self, code, tick_buffer, orderbook_analyzer, regime="reversion"):
         """활성 시그널 계산 → {name: score} 딕셔너리
 
-        VWAP Reversion 전환: micro_trend, momentum_burst, volume_surge 비활성.
-        vwap_reversion이 이벤트 트리거로 동작 (3조건 AND).
+        regime에 따라 다른 시그널 세트 반환:
+        - reversion: vwap_reversion + orderbook_pressure
+        - momentum: momentum_burst + micro_trend + orderbook_pressure
         """
-        return {
-            "vwap_reversion": self.signal_vwap_reversion(code, tick_buffer),
-            "orderbook_pressure": self.signal_orderbook_pressure(code, orderbook_analyzer),
-        }
+        if regime == "momentum":
+            raise ValueError(
+                "momentum 시그널 비활성 (2026-03-11). "
+                "386건 분석: 엣지 없음. "
+                "활성화하려면 새 시그널 설계 + 데이터 검증 필수."
+            )
+        else:
+            return {
+                "vwap_reversion": self.signal_vwap_reversion(code, tick_buffer),
+                "orderbook_pressure": self.signal_orderbook_pressure(code, orderbook_analyzer),
+            }
 
     def get_composite_score(self, signals, weights: dict = None):
         """가중 합산 복합 스코어 (0~100)"""

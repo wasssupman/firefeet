@@ -101,6 +101,8 @@ def engine(mock_manager, mock_ws, mock_scanner, scalp_settings, tmp_path):
     eng.strategy = ScalpStrategy(eng.signals, scalp_settings)
     eng.strategy_selector = StrategySelector("config/scalping_strategies.yaml")
     eng.risk_manager = RiskManager(scalp_settings, mode="PAPER")
+    from core.scalping.regime_detector import RegimeDetector
+    eng.regime_detector = RegimeDetector()
 
     # 스크리너 mock
     eng.screener = MagicMock()
