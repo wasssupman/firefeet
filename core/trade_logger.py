@@ -38,6 +38,32 @@ class TradeLogger:
             with open(self.csv_path, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
                 writer.writerow(self.CSV_HEADER)
+        else:
+            self._migrate_csv_header()
+
+    def _migrate_csv_header(self):
+        """기존 CSV 헤더에 누락된 컬럼이 있으면 추가"""
+        with open(self.csv_path, "r", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            existing_header = next(reader, None)
+        if not existing_header:
+            return
+        missing = [col for col in self.CSV_HEADER if col not in existing_header]
+        if not missing:
+            return
+        # 기존 데이터 읽기
+        with open(self.csv_path, "r", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            next(reader)  # skip old header
+            rows = list(reader)
+        # 새 헤더 + 기존 데이터 (누락 컬럼은 빈값)
+        new_header = existing_header + missing
+        with open(self.csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(new_header)
+            for row in rows:
+                row.extend([""] * len(missing))
+                writer.writerow(row)
 
     # ── Fee Calculation ──────────────────────────────────────
 
